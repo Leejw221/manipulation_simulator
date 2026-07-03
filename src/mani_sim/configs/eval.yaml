@@ -1,0 +1,9 @@
+defaults:
+  - task: lift_low_dim
+  - policy: diffusion_unet_lowdim
+  - _self_
+
+checkpoint_path: ???
+num_episodes: 50
+max_steps: 400
+device: cuda

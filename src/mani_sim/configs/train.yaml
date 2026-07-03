@@ -1,0 +1,20 @@
+defaults:
+  - task: lift_low_dim
+  - policy: diffusion_unet_lowdim
+  - _self_
+
+seed: 0
+batch_size: 64
+# num_workers=0 고정: robomimic SequenceDataset이 내부 h5py 파일 핸들을 지연 생성(lazy)해서 갖고 있어
+# 멀티프로세스 DataLoader(num_workers>0)로 워커 프로세스에 피클링될 때 안전한지 검증 안 함 [미확인].
+# 실제 학습 규모를 키울 때 확인 후 올릴 것.
+num_workers: 0
+lr: 1.0e-4
+weight_decay: 1.0e-6
+num_epochs: 100
+log_every: 50
+ckpt_every_epochs: 10
+output_dir: outputs/train/${task.name}_${policy.name}
+device: cuda
+use_wandb: true
+wandb_project: mani_sim

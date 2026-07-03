@@ -1,0 +1,11 @@
+name: diffusion_unet_lowdim
+obs_horizon: 2
+pred_horizon: 16
+action_horizon: 8
+down_dims: [256, 512]
+kernel_size: 5
+n_groups: 8
+diffusion_step_embed_dim: 256
+num_train_timesteps: 100
+beta_schedule: squaredcos_cap_v2
+num_inference_steps: 10

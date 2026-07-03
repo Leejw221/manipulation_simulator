@@ -1,0 +1,11 @@
+name: can_low_dim
+env_name: PickPlaceCan  # 데이터셋 이름은 "can"이지만 실제 robosuite env_name은 다름 [검증: env_args로 확인]
+robots: Panda
+hdf5_path: data/robomimic/can/ph/v1.5/can/ph/low_dim_v15.hdf5
+obs_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, object]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 2
+  object: 14
+action_dim: 7

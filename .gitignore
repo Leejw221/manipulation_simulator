@@ -1,0 +1,13 @@
+# 데이터·산출물 (git 밖 — docs/plan.md 원칙 5)
+data/
+outputs/
+wandb/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# 환경
+.venv/
