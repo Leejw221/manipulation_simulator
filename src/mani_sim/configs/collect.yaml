@@ -11,9 +11,32 @@ device: cuda
 checkpoint_path: null
 
 num_episodes: 5
-max_steps: null            # null=상한 없음. 성공/env done/Enter(종료)까지 진행 (배포 수집 기본)
+max_steps: null            # null=상한 없음. 성공/env done/종료키까지 진행 (배포 수집 기본)
 preintv_length: 15
-toggle_key: ctrl           # 개입 on/off 토글키. "ctrl"=좌·우 Ctrl 모두 인식 (단일 문자/Key 이름도 가능)
-control_fps: 20            # 실시간 페이싱(Hz). 사람이 보고 개입할 시간 확보 (env 제어주기와 맞춤)
+control_fps: 20            # 실시간 페이싱(Hz). 사람이 보고 개입할 시간 확보 (env 제어주기·PICO 필터 rate와 맞춤)
 render: true               # 사람이 보고 개입하려면 true (화면 필요)
 output_path: outputs/intervention/${task.name}_round.hdf5
+
+# 개입 입력 장치: pico | keyboard
+intervention_device: pico
+
+# 키보드 개입용 (device=keyboard일 때만 사용)
+toggle_key: ctrl           # 개입 on/off 토글키. "ctrl"=좌·우 Ctrl 모두 인식 (단일 문자/Key 이름도 가능)
+
+# PICO VR 개입용 (device=pico일 때만 사용). xrobotoolkit_sdk + PICO 연결 필요.
+pico:
+  side: right              # 조작에 쓸 컨트롤러: right | left
+  toggle_button: B         # 개입 on/off 버튼
+  end_button: Y            # 에피소드 종료 버튼
+  grip_threshold: 0.9      # 클러치 판정 임계 (grip 아날로그 > 이 값이면 팔 이동)
+  # --- 실기 보정 노브 (아래 3개는 하드웨어에서 맞춰야 함) ---
+  pos_scale: 80.0          # 이동 감도 (컨트롤러 이동 → OSC 정규화 단위, ~60이 1:1, 그 이상은 증폭)
+  rot_scale: 4.0           # 회전 감도
+  gripper_sign: 1.0        # Panda 그리퍼 부호(+1=닫힘 가정). 그리퍼가 반대로 움직이면 -1
+  R_headset_world:         # PICO 헤드셋 → 로봇 base 축 대응 (row-major 3x3, 반사 허용).
+    # 우=+x·상=+y·전=-z(PICO) → 전=+x·좌=+y·상=+z(robot), 좌우 미러 보정(사용자 시점 정렬)
+    [0.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+  # --- 1-Euro 필터 (VR 지터 완화) ---
+  euro_min_cutoff: 1.0
+  euro_beta: 0.01
+  euro_d_cutoff: 1.0
