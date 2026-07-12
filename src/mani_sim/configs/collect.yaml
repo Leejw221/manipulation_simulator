@@ -1,0 +1,19 @@
+defaults:
+  - task: lift_low_dim
+  - policy: diffusion_unet_lowdim
+  - _self_
+
+seed: 0
+device: cuda
+
+# 학습된 정책 체크포인트(.pt). null이면 무작위 초기화 정책으로 시작
+# (개입 조작·저장 경로를 먼저 테스트해보고 싶을 때 유용).
+checkpoint_path: null
+
+num_episodes: 5
+max_steps: null            # null=상한 없음. 성공/env done/Enter(종료)까지 진행 (배포 수집 기본)
+preintv_length: 15
+toggle_key: ctrl           # 개입 on/off 토글키. "ctrl"=좌·우 Ctrl 모두 인식 (단일 문자/Key 이름도 가능)
+control_fps: 20            # 실시간 페이싱(Hz). 사람이 보고 개입할 시간 확보 (env 제어주기와 맞춤)
+render: true               # 사람이 보고 개입하려면 true (화면 필요)
+output_path: outputs/intervention/${task.name}_round.hdf5

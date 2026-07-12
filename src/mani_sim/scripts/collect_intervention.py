@@ -1,0 +1,98 @@
+"""사람(키보드) 개입 rollout으로 개입 데이터셋 수집.
+
+사용:
+    # 화면에서 실행 (개입하려면 render=true, 화면 필요)
+    python -m mani_sim.scripts.collect_intervention checkpoint_path=outputs/train/.../policy_epochN.pt
+
+    # 정책 없이 조작·저장 경로만 먼저 테스트
+    python -m mani_sim.scripts.collect_intervention num_episodes=1
+
+조작: toggle_key(기본 Tab)로 개입 on/off. 개입 중 화살표/회전키로 이동, space로 그리퍼,
+q로 현재 에피소드 종료. 저장물은 robomimic 형식 HDF5(+action_mode)라 학습에 바로 쓴다.
+"""
+
+import hydra
+import numpy as np
+import torch
+from omegaconf import DictConfig
+
+from mani_sim.datasets.intervention_writer import write_intervention_hdf5
+from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
+from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats
+from mani_sim.envs.robomimic.factory import make_lowdim_env
+from mani_sim.policies.diffusion.diffusion_policy import DiffusionPolicyLowDim
+from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
+
+
+@hydra.main(config_path="../configs", config_name="collect", version_base=None)
+def main(cfg: DictConfig):
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(cfg.seed)
+
+    env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, cfg.task.obs_keys, render=cfg.render)
+    normalizer = MinMaxNormalizer(compute_minmax_stats(cfg.task.hdf5_path, cfg.task.obs_keys))
+
+    policy = DiffusionPolicyLowDim(
+        obs_keys=cfg.task.obs_keys,
+        obs_dims=cfg.task.obs_dims,
+        obs_horizon=cfg.policy.obs_horizon,
+        action_dim=cfg.task.action_dim,
+        pred_horizon=cfg.policy.pred_horizon,
+        down_dims=cfg.policy.down_dims,
+        kernel_size=cfg.policy.kernel_size,
+        n_groups=cfg.policy.n_groups,
+        diffusion_step_embed_dim=cfg.policy.diffusion_step_embed_dim,
+        num_train_timesteps=cfg.policy.num_train_timesteps,
+        beta_schedule=cfg.policy.beta_schedule,
+        num_inference_steps=cfg.policy.num_inference_steps,
+    ).to(device)
+
+    if cfg.checkpoint_path:
+        ckpt = torch.load(cfg.checkpoint_path, map_location=device)
+        policy.load_state_dict(ckpt["model"])
+        print("loaded checkpoint:", cfg.checkpoint_path)
+    else:
+        print("no checkpoint — 무작위 초기화 정책 (조작/저장 경로 테스트용)")
+
+    intervention = KeyboardIntervention(env.env, toggle_key=cfg.toggle_key)
+    print(
+        f"[개입] {cfg.toggle_key}=개입 on/off · 화살표/회전키=이동 · space=그리퍼 · "
+        "Enter=에피소드 종료 (max_steps 없이 성공/종료까지 진행)"
+    )
+
+    episodes = []
+    try:
+        for i in range(cfg.num_episodes):
+            intervention.reset()
+            ep = collect_episode(
+                env,
+                policy,
+                normalizer,
+                cfg.task.obs_keys,
+                cfg.policy.obs_horizon,
+                cfg.policy.action_horizon,
+                device,
+                intervention,
+                max_steps=cfg.max_steps,
+                should_end_fn=intervention.should_end,
+                preintv_length=cfg.preintv_length,
+                render=cfg.render,
+                control_fps=cfg.control_fps,
+            )
+            modes = ep["action_modes"]
+            print(
+                f"ep {i}: {len(modes)} frames · "
+                f"intv={int((modes == LABEL_INTV).sum())} "
+                f"preintv={int((modes == LABEL_PREINTV).sum())} "
+                f"success={ep['success']}"
+            )
+            episodes.append(ep)
+    finally:
+        intervention.close()
+
+    out = write_intervention_hdf5(cfg.output_path, episodes, cfg.task.obs_keys)
+    print("저장:", out, "| 총 에피소드:", len(episodes))
+
+
+if __name__ == "__main__":
+    main()
