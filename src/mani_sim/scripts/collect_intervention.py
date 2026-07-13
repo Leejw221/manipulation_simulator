@@ -10,7 +10,8 @@
     # 정책 없이 조작·저장 경로만 먼저 테스트
     python -m mani_sim.scripts.collect_intervention num_episodes=1
 
-조작(PICO): B=개입 on/off · grip=클러치(잡은 동안만 팔 이동) · trigger=그리퍼 · Y=에피소드 종료.
+조작(PICO): B=개입 on/off · grip=클러치(잡은 동안만 팔 이동) · trigger=그리퍼 ·
+            A=시점 전환(정면→각진→top→측면 순환, 깊이 판단용) · Y=에피소드 종료.
 조작(키보드): toggle_key(기본 Ctrl)=개입 on/off · 화살표/회전키=이동 · space=그리퍼 · Enter=종료.
 저장물은 robomimic 형식 HDF5(+action_mode)라 학습에 바로 쓴다.
 """
@@ -58,6 +59,8 @@ def main(cfg: DictConfig):
     else:
         print("no checkpoint — 무작위 초기화 정책 (조작/저장 경로 테스트용)")
 
+    cycler = None
+    render_fn = None
     if cfg.intervention_device == "pico":
         from mani_sim.runners.pico_intervention import PICOIntervention
 
@@ -78,8 +81,21 @@ def main(cfg: DictConfig):
         )
         print(
             f"[개입/PICO] {cfg.pico.toggle_button}=개입 on/off · grip=클러치(잡은 동안만 이동) · "
-            f"trigger=그리퍼 · {cfg.pico.end_button}=에피소드 종료 (max_steps 없이 성공/종료까지 진행)"
+            f"trigger=그리퍼 · A=시점전환 · {cfg.pico.end_button}=에피소드 종료 (성공/종료까지 진행)"
         )
+
+        if cfg.render:
+            from mani_sim.runners.sim_viewer import CameraCycler
+
+            cycler = CameraCycler(env)
+            prev_a = [False]
+
+            def render_fn():
+                a_btn = bool(intervention.xrt.get_A_button())
+                if a_btn and not prev_a[0]:
+                    print(f"\n[시점] {cycler.cycle()}")
+                prev_a[0] = a_btn
+                return cycler.render()
     else:
         intervention = KeyboardIntervention(env.env, toggle_key=cfg.toggle_key)
         print(
@@ -104,6 +120,7 @@ def main(cfg: DictConfig):
                 should_end_fn=intervention.should_end,
                 preintv_length=cfg.preintv_length,
                 render=cfg.render,
+                render_fn=render_fn,
                 control_fps=cfg.control_fps,
             )
             modes = ep["action_modes"]
@@ -114,6 +131,9 @@ def main(cfg: DictConfig):
                 f"success={ep['success']}"
             )
             episodes.append(ep)
+            if cycler is not None and not cycler.is_running():
+                print("뷰어 창이 닫혀 수집을 종료합니다.")
+                break
     finally:
         intervention.close()
 

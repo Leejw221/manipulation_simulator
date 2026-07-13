@@ -33,9 +33,10 @@ pico:
   pos_scale: 80.0          # 이동 감도 (컨트롤러 이동 → OSC 정규화 단위, ~60이 1:1, 그 이상은 증폭)
   rot_scale: 4.0           # 회전 감도
   gripper_sign: 1.0        # Panda 그리퍼 부호(+1=닫힘 가정). 그리퍼가 반대로 움직이면 -1
-  R_headset_world:         # PICO 헤드셋 → 로봇 base 축 대응 (row-major 3x3, 반사 허용).
-    # 우=+x·상=+y·전=-z(PICO) → 전=+x·좌=+y·상=+z(robot), 좌우 미러 보정(사용자 시점 정렬)
-    [0.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+  R_headset_world:         # PICO 헤드셋 → 로봇 base 축 대응 (row-major 3x3).
+    # 사용자가 로봇과 마주봄 → 위축 기준 180° 회전(좌우+앞뒤 반전, det=+1 정상회전).
+    # 우(pico+x)→robot+y · 위(+y)→+z · 앞으로(-z)→robot-x(블록서 멀어짐) · 당기기→블록쪽
+    [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
   # --- 1-Euro 필터 (VR 지터 완화) ---
   euro_min_cutoff: 1.0
   euro_beta: 0.01

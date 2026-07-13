@@ -81,7 +81,7 @@ class PICOIntervention:
         gripper_sign=1.0,
         toggle_button="B",
         end_button="Y",
-        R_headset_world=(0, 0, -1, 1, 0, 0, 0, 1, 0),
+        R_headset_world=(0, 0, 1, 1, 0, 0, 0, 1, 0),
         grip_threshold=0.9,
         control_hz=20.0,
         euro_min_cutoff=1.0,

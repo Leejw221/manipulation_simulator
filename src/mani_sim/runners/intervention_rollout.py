@@ -49,6 +49,7 @@ def collect_episode(
     should_end_fn=None,
     preintv_length=15,
     render=False,
+    render_fn=None,
     control_fps=0.0,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
@@ -62,6 +63,9 @@ def collect_episode(
 
     control_fps > 0이면 각 스텝을 그 주기에 맞춰 실시간으로 늦춘다(사람이 보고 개입할
     시간 확보). 0이면 페이싱 없이 최대 속도(테스트·오프라인 수집용).
+
+    render_fn이 주어지면 매 스텝 호출하고 False 반환 시 에피소드를 끝낸다(커스텀 뷰어용,
+    render보다 우선). 없고 render=True면 기존 env.render(mode="human")를 쓴다.
     """
     policy.eval()
     obs_raw = env.reset()
@@ -97,7 +101,10 @@ def collect_episode(
 
         obs_raw, _reward, done, _info = env.step(action)
         obs_history.append(obs_raw)
-        if render:
+        if render_fn is not None:
+            if not render_fn():  # 창이 닫히면 에피소드 종료
+                break
+        elif render:
             env.render(mode="human")
 
         if env.is_success()["task"]:
