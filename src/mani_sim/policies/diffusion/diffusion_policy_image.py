@@ -1,0 +1,150 @@
+"""Diffusion Policy — 이미지(픽셀) obs 버전.
+
+low-dim 버전과 U-Net·스케줄러는 동일하고, obs conditioning만 다르다:
+  - rgb 키: 카메라별 vision encoder(ResNet-18)로 (C,H,W)→feature 벡터
+  - lowdim 키(proprio·stage): 그대로
+  두 종류를 obs_horizon 프레임마다 이어붙여(concat) global conditioning 벡터로 쓴다.
+
+이미지는 SequenceDataset(ObsUtils rgb 모달리티)이 (C,H,W) float[0,1]로 넘겨준다고 가정한다.
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+
+from mani_sim.networks.conditional_unet1d import ConditionalUnet1d
+
+
+def _replace_bn_with_gn(module, num_groups=16):
+    """BatchNorm2d → GroupNorm (작은 배치·per-camera 인코더에서 BN 통계 불안정 회피, DP 관례)."""
+    for name, child in module.named_children():
+        if isinstance(child, nn.BatchNorm2d):
+            setattr(module, name, nn.GroupNorm(num_groups=min(num_groups, child.num_features),
+                                               num_channels=child.num_features))
+        else:
+            _replace_bn_with_gn(child, num_groups)
+
+
+class SpatialSoftmax(nn.Module):
+    """Spatial soft-argmax (Finn et al.). (B,C,H,W) → (B,K,2) 키포인트. manipulation_pipeline 참고."""
+
+    def __init__(self, input_shape, num_kp=32):
+        super().__init__()
+        c, h, w = input_shape
+        self.nets = nn.Conv2d(c, num_kp, kernel_size=1)
+        self._out_c, self._h, self._w = num_kp, h, w
+        pos_x, pos_y = np.meshgrid(np.linspace(-1, 1, w), np.linspace(-1, 1, h))
+        pos = np.concatenate([pos_x.reshape(-1, 1), pos_y.reshape(-1, 1)], axis=1)
+        self.register_buffer("pos_grid", torch.from_numpy(pos).float())
+
+    def forward(self, x):
+        x = self.nets(x).reshape(-1, self._h * self._w)
+        att = F.softmax(x, dim=-1)
+        return (att @ self.pos_grid).view(-1, self._out_c, 2)
+
+
+class VisionEncoder(nn.Module):
+    """ResNet-18 backbone(spatial 유지) + SpatialSoftmax → 키포인트 feature. 입력 (B,3,H,W) float[0,1]."""
+
+    def __init__(self, num_kp=32, input_hw=(84, 84)):
+        super().__init__()
+        resnet = torchvision.models.resnet18(weights=None)
+        _replace_bn_with_gn(resnet)
+        self.backbone = nn.Sequential(*list(resnet.children())[:-2])  # avgpool·fc 제거 → (B,512,h,w)
+        with torch.no_grad():
+            c, h, w = self.backbone(torch.zeros(1, 3, *input_hw)).shape[1:]
+        self.pool = SpatialSoftmax((c, h, w), num_kp=num_kp)
+        self.out_dim = num_kp * 2
+
+    def forward(self, x):
+        return self.pool(self.backbone(x)).flatten(1)  # (B, num_kp*2)
+
+
+class DiffusionPolicyImage(nn.Module):
+    def __init__(
+        self,
+        rgb_keys,
+        lowdim_keys,
+        obs_dims,
+        obs_horizon,
+        action_dim,
+        pred_horizon,
+        num_kp=32,
+        image_hw=(84, 84),
+        down_dims=(256, 512),
+        kernel_size=5,
+        n_groups=8,
+        diffusion_step_embed_dim=256,
+        num_train_timesteps=100,
+        beta_schedule="squaredcos_cap_v2",
+        num_inference_steps=10,
+    ):
+        super().__init__()
+        self.rgb_keys = list(rgb_keys)
+        self.lowdim_keys = list(lowdim_keys)
+        self.obs_horizon = obs_horizon
+        self.action_dim = action_dim
+        self.pred_horizon = pred_horizon
+        self.num_inference_steps = num_inference_steps
+
+        self.encoders = nn.ModuleDict(
+            {k: VisionEncoder(num_kp=num_kp, input_hw=tuple(image_hw)) for k in self.rgb_keys}
+        )
+        feat = next(iter(self.encoders.values())).out_dim if self.rgb_keys else 0
+
+        per_step_dim = len(self.rgb_keys) * feat + sum(obs_dims[k] for k in self.lowdim_keys)
+        global_cond_dim = obs_horizon * per_step_dim
+        self.unet = ConditionalUnet1d(
+            input_dim=action_dim, global_cond_dim=global_cond_dim, down_dims=down_dims,
+            kernel_size=kernel_size, n_groups=n_groups, diffusion_step_embed_dim=diffusion_step_embed_dim,
+        )
+
+        self.train_scheduler = DDPMScheduler(
+            num_train_timesteps=num_train_timesteps, beta_schedule=beta_schedule,
+            clip_sample=True, prediction_type="epsilon",
+        )
+        self.inference_scheduler = DDIMScheduler(
+            num_train_timesteps=num_train_timesteps, beta_schedule=beta_schedule,
+            clip_sample=True, prediction_type="epsilon",
+        )
+
+    def _encode(self, obs):
+        """obs: rgb (B,To,C,H,W) / lowdim (B,To,D) → global_cond (B, To*per_step)."""
+        feats = []
+        for k in self.rgb_keys:
+            img = obs[k]                       # (B, To, C, H, W)
+            b, to = img.shape[:2]
+            f = self.encoders[k](img.reshape(b * to, *img.shape[2:]))  # (B*To, feat)
+            feats.append(f.reshape(b, to, -1))
+        for k in self.lowdim_keys:
+            feats.append(obs[k])               # (B, To, D)
+        per_step = torch.cat(feats, dim=-1)    # (B, To, per_step)
+        return per_step.flatten(start_dim=1)
+
+    def compute_loss(self, batch):
+        obs, action, action_mask = batch["obs"], batch["action"], batch["action_mask"]
+        global_cond = self._encode(obs)
+        noise = torch.randn_like(action)
+        timesteps = torch.randint(
+            0, self.train_scheduler.config.num_train_timesteps, (action.shape[0],), device=action.device
+        ).long()
+        noisy = self.train_scheduler.add_noise(action, noise, timesteps)
+        pred = self.unet(noisy, timesteps, global_cond)
+        loss = F.mse_loss(pred, noise, reduction="none")
+        mask = action_mask.unsqueeze(-1).float()
+        return (loss * mask).sum() / mask.sum().clamp(min=1.0) / self.action_dim
+
+    @torch.no_grad()
+    def predict_action_chunk(self, obs):
+        global_cond = self._encode(obs)
+        b = global_cond.shape[0]
+        device = global_cond.device
+        self.inference_scheduler.set_timesteps(self.num_inference_steps, device=device)
+        sample = torch.randn((b, self.pred_horizon, self.action_dim), device=device)
+        for t in self.inference_scheduler.timesteps:
+            sample = self.inference_scheduler.step(self.unet(sample, t, global_cond), t, sample).prev_sample
+        return sample

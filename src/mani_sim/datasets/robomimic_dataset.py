@@ -15,10 +15,12 @@ import torch
 from robomimic.utils.dataset import SequenceDataset
 
 
-def _ensure_obs_utils_initialized(obs_keys):
+def _ensure_obs_utils_initialized(low_dim_keys, rgb_keys=()):
     if ObsUtils.OBS_KEYS_TO_MODALITIES is not None:
         return
-    ObsUtils.initialize_obs_utils_with_obs_specs({"obs": {"low_dim": list(obs_keys), "rgb": []}})
+    ObsUtils.initialize_obs_utils_with_obs_specs(
+        {"obs": {"low_dim": list(low_dim_keys), "rgb": list(rgb_keys)}}
+    )
 
 
 class RobomimicSequenceDataset(torch.utils.data.Dataset):
@@ -43,8 +45,12 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
         normalizer=None,
         action_key="actions",
         filter_key=None,
+        rgb_keys=(),
+        hdf5_cache_mode="low_dim",
     ):
-        _ensure_obs_utils_initialized(obs_keys)
+        self.rgb_keys = list(rgb_keys)
+        low_dim_keys = [k for k in obs_keys if k not in self.rgb_keys]
+        _ensure_obs_utils_initialized(low_dim_keys, self.rgb_keys)
 
         self.obs_keys = list(obs_keys)
         self.obs_horizon = obs_horizon
@@ -63,7 +69,7 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
             pad_seq_length=True,
             get_pad_mask=True,
             filter_by_attribute=filter_key,
-            hdf5_cache_mode="low_dim",
+            hdf5_cache_mode=hdf5_cache_mode,
         )
 
     def __len__(self):
@@ -77,13 +83,33 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
             key: torch.as_tensor(raw["obs"][key][: self.obs_horizon], dtype=torch.float32)
             for key in self.obs_keys
         }
+        # rgb: (To,H,W,C) uint8값 → (To,C,H,W) float[0,1]
+        for key in self.rgb_keys:
+            obs[key] = obs[key].permute(0, 3, 1, 2) / 255.0
         action = torch.as_tensor(raw[self.action_key][-self.pred_horizon :], dtype=torch.float32)
         action_mask = torch.as_tensor(
             raw["pad_mask"][-self.pred_horizon :, 0], dtype=torch.bool
         )
 
         if self.normalizer is not None:
-            obs = self.normalizer.normalize_obs(obs)
+            # rgb 이미지는 이미 [0,1] → 정규화 제외, proprio·stage만 정규화
+            low = {k: v for k, v in obs.items() if k not in self.rgb_keys}
+            obs.update(self.normalizer.normalize_obs(low))
             action = self.normalizer.normalize_action(action)
 
-        return {"obs": obs, "action": action, "action_mask": action_mask}
+        # RA-BC 등 외부 가중치가 demo 내 위치(progress lookup)를 찾을 수 있게 노출.
+        # robomimic SequenceDataset이 내부적으로 계산하는 것과 동일한 정의(get_item 참고):
+        # index_in_demo = 이 샘플의 obs 이력이 끝나는(=행동 청크가 시작하는) 프레임.
+        seq = self._seq_dataset
+        demo_id = seq._index_to_demo_id[index]
+        demo_start = seq._demo_id_to_start_indices[demo_id]
+        offset = 0 if seq.pad_frame_stack else (seq.n_frame_stack - 1)
+        index_in_demo = index - demo_start + offset
+
+        return {
+            "obs": obs,
+            "action": action,
+            "action_mask": action_mask,
+            "demo_id": demo_id,
+            "index_in_demo": index_in_demo,
+        }

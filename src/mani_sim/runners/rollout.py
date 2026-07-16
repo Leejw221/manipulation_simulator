@@ -21,16 +21,18 @@ def rollout_policy(env, policy, normalizer, obs_keys, obs_horizon, action_horizo
         success = False
         step_count = 0
         while step_count < max_steps:
+            # normalizer 통계는 CPU 텐서 → CPU에서 정규화 후 device로 이동(intervention_rollout.py와 동일 관례)
             obs_batch = {
                 key: torch.as_tensor(
-                    np.stack([o[key] for o in obs_history]), dtype=torch.float32, device=device
+                    np.stack([o[key] for o in obs_history]), dtype=torch.float32
                 ).unsqueeze(0)
                 for key in obs_keys
             }
             obs_batch = normalizer.normalize_obs(obs_batch)
+            obs_batch = {k: v.to(device) for k, v in obs_batch.items()}
 
-            action_chunk = policy.predict_action_chunk(obs_batch)  # (1, Tp, Da), normalized
-            action_chunk = normalizer.unnormalize_action(action_chunk[0])  # (Tp, Da)
+            action_chunk = policy.predict_action_chunk(obs_batch)  # (1, Tp, Da), normalized, on device
+            action_chunk = normalizer.unnormalize_action(action_chunk[0].cpu())  # (Tp, Da)
 
             for t in range(action_horizon):
                 action = action_chunk[t].detach().cpu().numpy()
