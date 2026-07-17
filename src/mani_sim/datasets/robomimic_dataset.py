@@ -47,6 +47,7 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
         filter_key=None,
         rgb_keys=(),
         hdf5_cache_mode="low_dim",
+        extra_keys=(),
     ):
         self.rgb_keys = list(rgb_keys)
         low_dim_keys = [k for k in obs_keys if k not in self.rgb_keys]
@@ -57,11 +58,12 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
         self.pred_horizon = pred_horizon
         self.normalizer = normalizer
         self.action_key = action_key
+        self.extra_keys = list(extra_keys)  # 예: action_mode(SIRIUS/APO 4-class 라벨)
 
         self._seq_dataset = SequenceDataset(
             hdf5_path=hdf5_path,
             obs_keys=self.obs_keys,
-            dataset_keys=(action_key,),
+            dataset_keys=(action_key,) + tuple(self.extra_keys),
             load_next_obs=False,
             frame_stack=obs_horizon,
             seq_length=pred_horizon,
@@ -106,10 +108,14 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
         offset = 0 if seq.pad_frame_stack else (seq.n_frame_stack - 1)
         index_in_demo = index - demo_start + offset
 
-        return {
+        item = {
             "obs": obs,
             "action": action,
             "action_mask": action_mask,
             "demo_id": demo_id,
             "index_in_demo": index_in_demo,
         }
+        # action_mode 등 extra_keys — action과 같은 뒤쪽 Tp 구간(행동 청크)으로 슬라이싱.
+        for key in self.extra_keys:
+            item[key] = torch.as_tensor(raw[key][-self.pred_horizon :], dtype=torch.float32)
+        return item

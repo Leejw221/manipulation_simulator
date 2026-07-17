@@ -66,13 +66,18 @@ class DiffusionPolicyLowDim(nn.Module):
             prediction_type="epsilon",
         )
 
+    def get_global_cond(self, obs):
+        """obs conditioning 계산 — APODiffusionPolicy 등 외부 래퍼가 LowDim/Image를
+        구분 없이 쓸 수 있게 하는 공통 인터페이스(DiffusionPolicyImage._encode와 대응)."""
+        return _flatten_obs(obs, self.obs_keys)
+
     def compute_loss(self, batch):
         """batch: {'obs': {key: (B,To,Dk)}, 'action': (B,Tp,Da), 'action_mask': (B,Tp)} (전부 정규화된 값)."""
         obs = batch["obs"]
         action = batch["action"]
         action_mask = batch["action_mask"]
 
-        global_cond = _flatten_obs(obs, self.obs_keys)
+        global_cond = self.get_global_cond(obs)
 
         batch_size = action.shape[0]
         device = action.device

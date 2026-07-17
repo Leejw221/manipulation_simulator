@@ -29,14 +29,11 @@ from mani_sim.policies.diffusion.diffusion_policy import DiffusionPolicyLowDim
 from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
 
 
-@hydra.main(config_path="../configs", config_name="collect", version_base=None)
-def main(cfg: DictConfig):
-    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(cfg.seed)
+def _build_diffusion_predict_fn(cfg, device, action_horizon):
+    """기존 경로: 우리 자체 DiffusionPolicyLowDim + MinMaxNormalizer, 청크(action_horizon>1) 재사용."""
+    from mani_sim.runners.intervention_rollout import _predict_chunk
 
-    env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, cfg.task.obs_keys, render=cfg.render)
     normalizer = MinMaxNormalizer(compute_minmax_stats(cfg.task.hdf5_path, cfg.task.obs_keys))
-
     policy = DiffusionPolicyLowDim(
         obs_keys=cfg.task.obs_keys,
         obs_dims=cfg.task.obs_dims,
@@ -58,6 +55,66 @@ def main(cfg: DictConfig):
         print("loaded checkpoint:", cfg.checkpoint_path)
     else:
         print("no checkpoint — 무작위 초기화 정책 (조작/저장 경로 테스트용)")
+
+    predict_fn = lambda history: _predict_chunk(policy, normalizer, history, cfg.task.obs_keys, device)
+    return policy, predict_fn
+
+
+def _build_robomimic_policy_env(cfg, device):
+    """SIRIUS/APO 배포 라운드용: robomimic 체크포인트(BC_RNN_GMM 계열, 우리 걸로 학습된
+    baseline/RA-BC/SIRIUS/APO 전부 이 경로 — low_dim이든 image든 동일) — 자체 정규화·
+    RNN 은닉상태를 갖고 있어 매 스텝 재계획(action_horizon=1)한다. algo_name이
+    "bc_rabc"/"bc_sirius"/"bc_apo"면 로드 전에 해당 train_robomimic_*.py를 import해
+    REGISTERED_CONFIGS/ALGO_REGISTRY에 등록해야 한다(eval_checkpoint.py와 동일한 이유) —
+    여기서는 셋 다 미리 import해 둔다.
+
+    env도 체크포인트 메타데이터로 직접 만든다(`FileUtils.env_from_checkpoint`) — task
+    yaml의 obs_keys를 참고하지 않는다. 체크포인트가 image를 쓰면 robomimic이 자동으로
+    render_offscreen=True·카메라 설정을 맞춰준다(env_from_checkpoint 자체 로직) — 우리가
+    카메라 이름·해상도를 따로 지정할 필요 없음. 화면(사람이 보고 개입) 표시는 이후
+    env.env.has_renderer=True로 별도 켠다(make_lowdim_env와 같은 트릭).
+    """
+    import robomimic.utils.file_utils as RMFileUtils
+
+    import train  # noqa: F401  ("bc_combined" 등록 — SIRIUS/APO 축 조합, 2026-07-16(4) 통합)
+    import train_robomimic_rabc  # noqa: F401  ("bc_rabc" 등록)
+
+    policy, ckpt_dict = RMFileUtils.policy_from_checkpoint(
+        ckpt_path=cfg.checkpoint_path, device=device, verbose=False
+    )
+    env, _ = RMFileUtils.env_from_checkpoint(
+        ckpt_dict=ckpt_dict, env_name=None, render=False, render_offscreen=False, verbose=False
+    )
+    if cfg.render:
+        env.env.has_renderer = True
+        env.env.renderer = "mjviewer"
+
+    obs_keys = list(policy.policy.global_config.all_obs_keys)
+    policy.start_episode()
+    print("loaded robomimic checkpoint:", cfg.checkpoint_path, "| obs_keys:", obs_keys)
+
+    def predict_fn(obs_history):
+        ob = obs_history[-1]  # robomimic 정책은 자체 RNN 은닉상태로 이력 관리 — 최신 관측 1개만
+        action = policy(ob=ob)  # (Da,) ndarray, 이미 unnormalize 완료
+        return action[None, :]  # (T=1, Da) — collect_episode의 청크 인터페이스에 맞춤
+
+    return policy, env, predict_fn, obs_keys
+
+
+@hydra.main(config_path="../configs", config_name="collect", version_base=None)
+def main(cfg: DictConfig):
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(cfg.seed)
+
+    policy_kind = cfg.get("policy_kind", "diffusion")
+    if policy_kind == "robomimic":
+        policy, env, predict_fn, obs_keys = _build_robomimic_policy_env(cfg, device)
+        action_horizon = 1  # robomimic 정책은 매 스텝 재계획(청크 없음)
+    else:
+        env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, cfg.task.obs_keys, render=cfg.render)
+        obs_keys = list(cfg.task.obs_keys)
+        policy, predict_fn = _build_diffusion_predict_fn(cfg, device, cfg.policy.action_horizon)
+        action_horizon = cfg.policy.action_horizon
 
     cycler = None
     render_fn = None
@@ -107,13 +164,15 @@ def main(cfg: DictConfig):
     try:
         for i in range(cfg.num_episodes):
             intervention.reset()
+            if policy_kind == "robomimic":
+                policy.start_episode()  # 매 에피소드 RNN 은닉상태 리셋
             ep = collect_episode(
                 env,
                 policy,
-                normalizer,
-                cfg.task.obs_keys,
+                None,  # normalizer: predict_fn이 자체 처리(robomimic) 또는 내부 클로저에 이미 바인딩(diffusion)
+                obs_keys,
                 cfg.policy.obs_horizon,
-                cfg.policy.action_horizon,
+                action_horizon,
                 device,
                 intervention,
                 max_steps=cfg.max_steps,
@@ -122,6 +181,7 @@ def main(cfg: DictConfig):
                 render=cfg.render,
                 render_fn=render_fn,
                 control_fps=cfg.control_fps,
+                predict_fn=predict_fn,
             )
             modes = ep["action_modes"]
             print(
@@ -137,7 +197,7 @@ def main(cfg: DictConfig):
     finally:
         intervention.close()
 
-    out = write_intervention_hdf5(cfg.output_path, episodes, cfg.task.obs_keys)
+    out = write_intervention_hdf5(cfg.output_path, episodes, obs_keys)
     print("저장:", out, "| 총 에피소드:", len(episodes))
 
 

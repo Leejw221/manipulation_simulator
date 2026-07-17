@@ -169,3 +169,25 @@ robomimic 자체는 시뮬레이터가 아니라 데모 학습 프레임워크. 
 - intervention 수집 방식 (teleop vs synthetic expert) — HITL 단계 진입 시 결정
 - 두 번째 벤치마크 후보 (LIBERO 등) — 격리 원칙만 지키고 후보 선정은 보류
 - 가중치 loss(Sirius weighted BC / APO KTO-style)의 구현 위치 — policy 내부 vs runner, 해당 단계에서 결정
+
+## 9. 백로그 — 학습 스크립트 registry/factory 리팩터링 (2026-07-16, 보류)
+
+**문제**: §2 설계원칙1("구조는 flare 컨벤션을 따른다")이 실제로는 지켜지지 않고 있음 — 지금
+`outputs/train_robomimic_{bc,rabc,sirius,apo}.py`·`train_bc.py`·`train_image.py`처럼
+**알고리즘마다 거의 같은 보일러플레이트를 복붙한 별도 스크립트**로 늘어나는 중.
+
+**flare의 실제 패턴**(참고 확인, `/home/moai/manipulation_pipeline/src/flare/` [검증-코드]):
+- `scripts/train.py`/`eval.py`는 verb별로 분리(파일 자체는 나뉨)되지만, 각각은 얇은
+  오케스트레이션만 하고 `flare.factory.get_policy_class(cfg.policy.name)`/
+  `get_runner_class(cfg.policy.runner)`로 **알고리즘을 config 값으로 분기**한다.
+- `sirius/train_weighted.py`(SIRIUS 확장)도 새 학습루프를 안 짜고, `WeightedDiffusionPolicy`/
+  `WeightedMultiRoundDataset`를 registry에 등록한 뒤 flare의 기존 runner를 그대로 재사용.
+
+**목표 구조**(제안, 확정 아님): `train_robomimic.py --algo bc|bc_rabc|bc_sirius|bc_apo`
+하나로 통합(algo 등록은 모듈 로드 시 4개 다 해두고 CLI로 선택), DP 쪽도 동일하게
+`train_diffusion.py --algo bc|apo`로. eval도 마찬가지로 알고리즘 무관 공통 스크립트 하나.
+
+**왜 지금 안 하나**: 진행 중인 학습(tmux `apo_base_image`)이 `eval_checkpoint.py`에 의존 —
+지금 옮기면 그 평가가 깨질 위험. DP-APO 이식(`apo_diffusion.py`)도 막 작성 중이라 흐름 끊김.
+**실제 라운드 데이터가 모여 여러 알고리즘을 반복 실행해야 하는 시점**(=지금 스크립트 개수가
+더 늘어나 복붙 비용이 커지는 시점)에 하는 게 ROI가 큼 — 그때 진행.

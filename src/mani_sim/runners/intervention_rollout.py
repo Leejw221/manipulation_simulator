@@ -51,6 +51,7 @@ def collect_episode(
     render=False,
     render_fn=None,
     control_fps=0.0,
+    predict_fn=None,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
 
@@ -66,8 +67,16 @@ def collect_episode(
 
     render_fn이 주어지면 매 스텝 호출하고 False 반환 시 에피소드를 끝낸다(커스텀 뷰어용,
     render보다 우선). 없고 render=True면 기존 env.render(mode="human")를 쓴다.
+
+    predict_fn(obs_history) -> (T, Da) ndarray로 청크 예측을 대체할 수 있다(예: robomimic
+    체크포인트처럼 자체 정규화·RNN 은닉상태를 갖는 정책 — 이 경우 T=1로 매 스텝 재계획해도
+    무방). None이면 기존 (policy, normalizer, obs_keys, obs_horizon, device) 기반
+    _predict_chunk를 그대로 쓴다(우리 자체 DP/BC-RNN 정책, 기존 동작 그대로).
     """
-    policy.eval()
+    if predict_fn is None:
+        predict_fn = lambda history: _predict_chunk(policy, normalizer, history, obs_keys, device)
+    if hasattr(policy, "eval"):
+        policy.eval()
     obs_raw = env.reset()
     obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
 
@@ -89,7 +98,7 @@ def collect_episode(
             chunk = None  # 개입 후 정책 복귀 시 강제 재계획
         else:
             if chunk is None or chunk_ptr >= action_horizon:
-                chunk = _predict_chunk(policy, normalizer, obs_history, obs_keys, device)
+                chunk = predict_fn(obs_history)
                 chunk_ptr = 0
             action = np.asarray(chunk[chunk_ptr], dtype=np.float32)
             chunk_ptr += 1

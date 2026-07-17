@@ -125,9 +125,14 @@ class DiffusionPolicyImage(nn.Module):
         per_step = torch.cat(feats, dim=-1)    # (B, To, per_step)
         return per_step.flatten(start_dim=1)
 
+    def get_global_cond(self, obs):
+        """DiffusionPolicyLowDim.get_global_cond과 대응 — APODiffusionPolicy 등 외부
+        래퍼가 LowDim/Image를 구분 없이 쓸 수 있게 하는 공통 인터페이스."""
+        return self._encode(obs)
+
     def compute_loss(self, batch):
         obs, action, action_mask = batch["obs"], batch["action"], batch["action_mask"]
-        global_cond = self._encode(obs)
+        global_cond = self.get_global_cond(obs)
         noise = torch.randn_like(action)
         timesteps = torch.randint(
             0, self.train_scheduler.config.num_train_timesteps, (action.shape[0],), device=action.device

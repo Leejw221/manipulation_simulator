@@ -1,4 +1,4 @@
-"""개입 데이터의 프레임별 action_mode 라벨 + pre-intervention 재라벨.
+"""개입 데이터의 프레임별 action_mode 라벨 + pre-intervention 재라벨 + preference(선호) 판정.
 
 SIRIUS/APO와 동일한 4-class 스킴을 쓴다:
   -1  demo         : 순수 시연 (round 0, 사람만)
@@ -7,12 +7,30 @@ SIRIUS/APO와 동일한 4-class 스킴을 쓴다:
  -10  pre-intv     : 각 개입 시작 직전 N개 프레임 (rollout에서 재라벨 — 실패로 이어진 행동)
 """
 
+import torch
 import numpy as np
 
 LABEL_DEMO = -1
 LABEL_ROLLOUT = 0
 LABEL_INTV = 1
 LABEL_PREINTV = -10
+
+DESIRABLE_LABELS = (LABEL_DEMO, LABEL_ROLLOUT, LABEL_INTV)  # undesirable = 나머지(=PREINTV)
+
+
+def desirable_mask(action_mode_window, preference_frames=8, desirable_labels=DESIRABLE_LABELS):
+    """action_mode_window: (B, W) 라벨 텐서 -> (B,) bool.
+
+    윈도우 앞 preference_frames개 프레임의 desirable 비율(평균) >= 0.5면 desirable(다수결).
+    weighting/action_error.py·losses/apo_loss.py가 공유하는 preference 판정 로직
+    (chosen/rejected를 나누는 기준은 하나여야 함 — 축마다 다시 정의하면 불일치 위험).
+    """
+    window = action_mode_window[:, :preference_frames]
+    frame_desirable = torch.zeros_like(window, dtype=torch.float32)
+    for label in desirable_labels:
+        hit = torch.isclose(window.float(), torch.full_like(window.float(), float(label)))
+        frame_desirable = torch.where(hit, torch.ones_like(frame_desirable), frame_desirable)
+    return frame_desirable.mean(dim=1) >= 0.5
 
 
 def relabel_preintv(action_modes, preintv_length):
