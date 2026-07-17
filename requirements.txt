@@ -41,3 +41,13 @@ av>=15.1.0
 opencv-python>=4.13.0.92
 matplotlib
 tqdm
+
+# OpenVLA(policy=openvla, 2026-07-17) — 선택 설치, bc/diffusion만 쓰면 불필요.
+# 버전 정확히 고정 필요(최신판들끼리도 서로 안 맞음, 전부 실행하며 실측 확인):
+#   transformers 최신판(5.x)엔 AutoModelForVision2Seq 자체가 없어짐 → 4.40.1로 내려야 함.
+#   peft 최신판은 그 구버전 transformers와 안 맞음(EncoderDecoderCache import 실패) → 0.11.1.
+#   timm 최신판은 OpenVLA 자체 버전가드(>=0.9.10,<1.0.0)에 걸림 → 0.9.16.
+transformers==4.40.1
+peft==0.11.1
+timm==0.9.16
+accelerate
