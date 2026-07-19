@@ -1,14 +1,15 @@
 """사람 개입 rollout으로 개입 데이터셋 수집. 입력 장치는 키보드 또는 PICO VR.
+(구 collect_intervention.py — train.py/eval.py와 동사 기준 이름 통일을 위해 리네임.)
 
 사용:
     # PICO(기본) — 화면에서 실행, PICO 연결 필요
-    python -m mani_sim.scripts.collect_intervention checkpoint_path=outputs/train/.../policy_epochN.pt
+    python -m mani_sim.scripts.collect checkpoint_path=outputs/train/.../policy_epochN.pt
 
     # 키보드 개입으로 전환
-    python -m mani_sim.scripts.collect_intervention intervention_device=keyboard
+    python -m mani_sim.scripts.collect intervention_device=keyboard
 
     # 정책 없이 조작·저장 경로만 먼저 테스트
-    python -m mani_sim.scripts.collect_intervention num_episodes=1
+    python -m mani_sim.scripts.collect num_episodes=1
 
 조작(PICO): B=개입 on/off · grip=클러치(잡은 동안만 팔 이동) · trigger=그리퍼 ·
             A=시점 전환(정면→각진→top→측면 순환, 깊이 판단용) · Y=에피소드 종료.
@@ -25,13 +26,16 @@ from mani_sim.datasets.intervention_writer import write_intervention_hdf5
 from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
 from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats
 from mani_sim.envs.robomimic.factory import make_image_env, make_lowdim_env
-from mani_sim.policies.diffusion.diffusion_policy import DiffusionPolicyLowDim
+from mani_sim.factory import registry
 from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
-from mani_sim.utils.task_utils import is_image_task, task_obs_keys
+from mani_sim.utils.task_utils import is_image_task, task_lowdim_keys, task_obs_keys
 
 
-def _build_diffusion_predict_fn(cfg, device, action_horizon):
-    """기존 경로: 우리 자체 DiffusionPolicyLowDim + MinMaxNormalizer, 청크(action_horizon>1) 재사용.
+def _build_policy_predict_fn(cfg, device, action_horizon):
+    """registry 기반(diffusion_lowdim/diffusion(image)/bc_rnn_lowdim 등 cfg.policy_name 아무거나)
+    + MinMaxNormalizer, 청크(action_horizon>1) 재사용. (구 _build_diffusion_predict_fn —
+    DiffusionPolicyLowDim 하드코딩을 registry.create_policy로 일반화 — round.py가
+    policy_name=bc_rnn_lowdim으로도 라운드를 돌릴 수 있어야 해서, 2026-07-19.)
 
     checkpoint_path=None + hdf5_path도 아직 없으면(새 task의 첫 수집, round0) 신경망 자체를
     안 만들고 제자리(zero-action) stub을 쓴다 - 어차피 PICO 개입이 매 스텝 override하니
@@ -47,22 +51,9 @@ def _build_diffusion_predict_fn(cfg, device, action_horizon):
         zero_chunk = np.zeros((action_horizon, cfg.task.action_dim), dtype=np.float32)
         return None, lambda history: zero_chunk
 
-    stats = compute_minmax_stats(cfg.task.hdf5_path, cfg.task.obs_keys)
+    stats = compute_minmax_stats(cfg.task.hdf5_path, task_lowdim_keys(cfg.task))
     normalizer = MinMaxNormalizer(stats)
-    policy = DiffusionPolicyLowDim(
-        obs_keys=cfg.task.obs_keys,
-        obs_dims=cfg.task.obs_dims,
-        obs_horizon=cfg.policy.obs_horizon,
-        action_dim=cfg.task.action_dim,
-        pred_horizon=cfg.policy.pred_horizon,
-        down_dims=cfg.policy.down_dims,
-        kernel_size=cfg.policy.kernel_size,
-        n_groups=cfg.policy.n_groups,
-        diffusion_step_embed_dim=cfg.policy.diffusion_step_embed_dim,
-        num_train_timesteps=cfg.policy.num_train_timesteps,
-        beta_schedule=cfg.policy.beta_schedule,
-        num_inference_steps=cfg.policy.num_inference_steps,
-    ).to(device)
+    policy = registry.create_policy(cfg.policy_name, cfg.task, cfg.policy).to(device)
 
     if cfg.checkpoint_path:
         ckpt = torch.load(cfg.checkpoint_path, map_location=device)
@@ -71,7 +62,9 @@ def _build_diffusion_predict_fn(cfg, device, action_horizon):
     else:
         print("no checkpoint — 무작위 초기화 정책 (조작/저장 경로 테스트용)")
 
-    predict_fn = lambda history: _predict_chunk(policy, normalizer, history, cfg.task.obs_keys, device)
+    obs_keys = task_obs_keys(cfg.task)
+    rgb_keys = cfg.task.rgb_keys if is_image_task(cfg.task) else ()
+    predict_fn = lambda history: _predict_chunk(policy, normalizer, history, obs_keys, device, rgb_keys=rgb_keys)
     return policy, predict_fn
 
 
@@ -151,7 +144,7 @@ def main(cfg: DictConfig):
                 gripper_types=gripper_types, env_kwargs=env_kwargs,
             )
             obs_keys = list(cfg.task.obs_keys)
-        policy, predict_fn = _build_diffusion_predict_fn(cfg, device, cfg.policy.action_horizon)
+        policy, predict_fn = _build_policy_predict_fn(cfg, device, cfg.policy.action_horizon)
         action_horizon = cfg.policy.action_horizon
 
     cycler = None

@@ -1,14 +1,21 @@
 """통합 rollout 평가(DP: low_dim·image 공용) — outputs/final_eval.py를 대체.
-OpenVLA는 predict_action_chunk가 아니라 매 스텝 단일 이미지 재계획이라 인터페이스가 달라
-별도 스크립트(eval_openvla.py)로 남긴다(flare의 eval.py/eval_real.py 분리와 같은 이유).
+render=true면 live_rollout.py가 하던 것과 동일하게 화면에 띄운다(low_dim=mjviewer 온스크린,
+image=cv2 오프스크린 렌더 — 동시 사용 시 GL 컨텍스트 충돌로 세그폴트하므로 분기, live_rollout.py
+에 있던 지뢰 그대로 유지). OpenVLA는 predict_action_chunk가 아니라 매 스텝 단일 이미지
+재계획이라 인터페이스가 달라 policy_name=="openvla"일 때 별도 루프로 분기한다.
 
 사용:
     python -m mani_sim.scripts.eval checkpoint_path=outputs/train/square_diffusion_unet/policy_epoch300.pt
     python -m mani_sim.scripts.eval task=square_stage checkpoint_path=... render=true
+    unset MUJOCO_GL  # low_dim 화면(mjviewer)일 때만 필요
+    python -m mani_sim.scripts.eval task=square policy_name=openvla policy=openvla \
+        checkpoint_path=outputs/train/square_openvla/lora_final/policy \
+        stats_path=outputs/train/square_openvla/normalization_stats.json save_gif=outputs/openvla_rollout.gif
 """
 
 import logging
 import os
+import time
 
 import hydra
 import numpy as np
@@ -23,19 +30,25 @@ from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_obs_key
 logger = logging.getLogger(__name__)
 
 
-@hydra.main(config_path="../configs", config_name="eval", version_base=None)
-def main(cfg: DictConfig):
-    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+def _to_pil(img_chw01):
+    """make_image_env가 주는 CHW float[0,1](robomimic ObsUtils 규약) -> PIL Image(HWC uint8).
+    hdf5 raw(HWC uint8)와 형식이 달라 변환 필요(EXP-01에 기록된 지뢰, OpenVLA rollout에서
+    처음 실제로 밟음)."""
+    from PIL import Image
+    img_hwc = np.transpose(np.asarray(img_chw01), (1, 2, 0))
+    img_uint8 = np.clip(img_hwc * 255.0, 0, 255).astype(np.uint8)
+    return Image.fromarray(img_uint8)
 
+
+def _run_dp_eval(cfg, device):
+    """DiffusionPolicy/BC 등 predict_action_chunk 인터페이스 공용 경로(receding-horizon)."""
     policy = registry.create_policy(cfg.policy_name, cfg.task, cfg.policy).to(device)
     ckpt = torch.load(cfg.checkpoint_path, map_location=device, weights_only=False)
     policy.load_state_dict(ckpt["model"])
     policy.eval()
 
-    stats_path = os.path.join(os.path.dirname(cfg.checkpoint_path), "normalization_stats.json")
+    stats_path = cfg.stats_path or os.path.join(os.path.dirname(cfg.checkpoint_path), "normalization_stats.json")
     normalizer = MinMaxNormalizer(load_stats(stats_path))
-
-    env = make_eval_env(cfg.task)
 
     extra_obs_fn = extra_reset_fn = None
     if cfg.task.get("use_online_stage_tracker", False):
@@ -43,24 +56,37 @@ def main(cfg: DictConfig):
         tracker = OnlineStageTracker()
 
         def extra_obs_fn(obs_raw):
-            import numpy as np
             return stage_onehot(np.array([tracker.step(obs_raw)]))[0]
 
         extra_reset_fn = tracker.reset
 
     on_episode_step = None
     if cfg.render:
-        import cv2
-        window_name = f"eval {os.path.basename(cfg.checkpoint_path)}"
-        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+        if is_image_task(cfg.task):
+            import cv2
+            env = make_eval_env(cfg.task)
+            window_name = f"eval {os.path.basename(cfg.checkpoint_path)}"
+            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
 
-        def on_episode_step(env_, ep, step):
-            frame = env_.render(mode="rgb_array", height=640, width=640, camera_name="agentview")
-            bgr = frame[:, :, ::-1].copy()
-            cv2.putText(bgr, f"ep {ep + 1}/{cfg.num_episodes} step {step}", (10, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.imshow(window_name, bgr)
-            cv2.waitKey(1)
+            def on_episode_step(env_, ep, step):
+                frame = env_.render(mode="rgb_array", height=640, width=640, camera_name="agentview")
+                bgr = frame[:, :, ::-1].copy()
+                cv2.putText(bgr, f"ep {ep + 1}/{cfg.num_episodes} step {step}", (10, 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.imshow(window_name, bgr)
+                cv2.waitKey(1)
+        else:
+            # low_dim: MuJoCo 네이티브 mjviewer(온스크린). image 분기(cv2 오프스크린)와 동시
+            # 사용 시 GL 컨텍스트 충돌로 세그폴트하므로(live_rollout.py에서 실측) 절대 안 섞음.
+            from mani_sim.envs.robomimic.factory import make_lowdim_env
+            env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.obs_keys),
+                                   render=True, gripper_types=cfg.task.get("gripper_types", None))
+
+            def on_episode_step(env_, ep, step):
+                env_.render()
+                time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
+    else:
+        env = make_eval_env(cfg.task)
 
     if cfg.eval_seed is not None:
         np.random.seed(cfg.eval_seed)  # env reset(너트 초기 위치) 시퀀스 고정 — 공정 비교용
@@ -72,10 +98,87 @@ def main(cfg: DictConfig):
         device=device, rgb_keys=cfg.task.rgb_keys if is_image_task(cfg.task) else (),
         extra_obs_fn=extra_obs_fn, extra_obs_reset_fn=extra_reset_fn, on_episode_step=on_episode_step,
     )
-    if cfg.render:
+    if cfg.render and is_image_task(cfg.task):
         import cv2
         cv2.destroyAllWindows()
     env.env.close()
+    return metrics
+
+
+def _run_openvla_eval(cfg):
+    """OpenVLA는 predict_action_chunk가 아니라 매 스텝 단일 이미지로 재계획(원 논문 방식) —
+    rollout_policy()의 청크 인터페이스와 안 맞아 별도 루프."""
+    from mani_sim.datasets.openvla_dataset import SQUARE_INSTRUCTION
+    from mani_sim.envs.robomimic.factory import make_image_env
+
+    if cfg.stats_path is None:
+        raise ValueError(
+            "policy_name=openvla는 stats_path를 명시해야 함 — checkpoint_path가 "
+            "{output_dir}/lora_final/policy라 dirname 추정(DP 관례)이 안 맞음"
+            "(stats는 {output_dir}/normalization_stats.json)."
+        )
+
+    cfg.policy.policy_adapter_path = cfg.checkpoint_path
+    normalizer = MinMaxNormalizer(load_stats(cfg.stats_path))
+    policy = registry.create_policy(cfg.policy_name, cfg.task, cfg.policy)
+    policy.model.eval()
+    logger.info(f"loaded adapter: {cfg.checkpoint_path}")
+
+    # OpenVLA는 224 사전학습 해상도를 기대(task.image_size가 84여도 여기선 224로 별도 렌더).
+    env = make_image_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.lowdim_keys),
+                          list(cfg.task.rgb_keys), list(cfg.task.camera_names), image_size=224)
+
+    if cfg.eval_seed is not None:
+        np.random.seed(cfg.eval_seed)
+
+    image_key = cfg.task.rgb_keys[0]
+    instruction = cfg.openvla_instruction or SQUARE_INSTRUCTION
+
+    successes = []
+    t0 = time.time()
+    for ep in range(cfg.num_episodes):
+        obs = env.reset()
+        success = False
+        steps = 0
+        gif_frames = [] if (cfg.save_gif and ep == 0) else None
+        while steps < cfg.max_steps:
+            img = _to_pil(obs[image_key])
+            action_norm = policy.predict_action(img, instruction)
+            action = normalizer.unnormalize_action(torch.as_tensor(action_norm, dtype=torch.float32)).numpy()
+            obs, _r, done, _i = env.step(action)
+            steps += 1
+            if gif_frames is not None and steps % 2 == 0:  # 매 2프레임마다(용량 절반)
+                frame = env.render(mode="rgb_array", height=224, width=224, camera_name="agentview")
+                from PIL import Image
+                gif_frames.append(Image.fromarray(frame))
+            if env.is_success()["task"]:
+                success = True
+            if success or done or steps >= cfg.max_steps:
+                break
+        if gif_frames:
+            gif_frames[0].save(cfg.save_gif, save_all=True, append_images=gif_frames[1:],
+                                duration=60, loop=0, optimize=True)
+            logger.info(f"GIF 저장: {cfg.save_gif} ({len(gif_frames)} 프레임)")
+        successes.append(success)
+        logger.info(f"episode {ep}: steps={steps} success={success}")
+
+    env.env.close()
+    logger.info(f"elapsed={time.time() - t0:.0f}s")
+    return {
+        "success_rate": float(np.mean(successes)),
+        "num_episodes": cfg.num_episodes,
+        "num_successes": int(np.sum(successes)),
+    }
+
+
+@hydra.main(config_path="../configs", config_name="eval", version_base=None)
+def main(cfg: DictConfig):
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+
+    if cfg.policy_name == "openvla":
+        metrics = _run_openvla_eval(cfg)
+    else:
+        metrics = _run_dp_eval(cfg, device)
 
     logger.info(f"checkpoint={cfg.checkpoint_path} {metrics}")
     print(metrics)

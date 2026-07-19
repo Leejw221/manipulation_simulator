@@ -6,13 +6,15 @@ defaults:
 seed: 0
 device: cuda
 
-# 배포할 정책 종류: diffusion(우리 자체 DiffusionPolicyLowDim, .pt 체크포인트, 청크 재계획)
+# 배포할 정책 종류: diffusion(registry 기반 — cfg.policy_name으로 diffusion_lowdim/diffusion(image)/
+#                  bc_rnn_lowdim 등 아무 registry 정책이나 배포 가능, .pt 체크포인트, 청크 재계획)
 #                | robomimic(BC_RNN_GMM 계열 — baseline/RA-BC/SIRIUS/APO 전부 이 경로,
 #                  .pth 체크포인트, 자체 정규화·RNN 은닉상태로 매 스텝 재계획).
 # SIRIUS/APO 배포 라운드 수집(round i≥1)엔 robomimic을 쓴다 — 그게 그 알고리즘들의 실제 base
-# 모델이라(EXP-03과 동일 파이프라인), Diffusion Policy 체크포인트를 개입 정책으로 배포하고
-# 싶을 때만 diffusion으로 바꾼다.
+# 모델이라(EXP-03과 동일 파이프라인), 우리 자체 학습 체크포인트(BC/DiffusionPolicy)를 개입
+# 정책으로 배포하고 싶을 때만 diffusion으로 바꾼다.
 policy_kind: diffusion
+policy_name: diffusion_lowdim  # policy_kind=diffusion일 때만 사용 — registry 키(diffusion_lowdim|diffusion|bc_rnn_lowdim)
 
 # 학습된 정책 체크포인트. diffusion=.pt, robomimic=.pth. null이면(diffusion 한정) 무작위
 # 초기화 정책으로 시작(개입 조작·저장 경로를 먼저 테스트해보고 싶을 때 유용).

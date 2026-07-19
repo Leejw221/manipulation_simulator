@@ -1,0 +1,39 @@
+defaults:
+  - task: lift_low_dim
+  - policy: diffusion_unet_lowdim
+  - _self_
+
+# registry 키 — collect/train/eval 세 단계 전부 이 값으로 정책을 로드/학습한다.
+policy_name: diffusion_lowdim
+
+seed: 0
+num_rounds: 3
+# round0(=최초 배포) 체크포인트 — 보통 train.py로 미리 학습해둔 base 정책(demo만으로 학습).
+# null이면 collect.py가 zero-action stub으로 시작(정책 없이 순수 개입으로만 첫 라운드를 모음).
+round0_checkpoint: null
+
+output_dir: outputs/round/${task.name}_${policy_name}
+
+# 매 라운드 collect(사람 개입) 설정 — collect.yaml 필드와 이름 동일.
+collect:
+  num_episodes: 5
+  intervention_device: pico
+  render: true
+  preintv_length: 15
+  control_fps: 20
+
+# 매 라운드 train 설정 — round0..현재까지 누적 데이터로 매번 처음부터 재학습(SIRIUS/APO 관례).
+train:
+  num_epochs: 100
+  eval_every_epochs: 0
+  batch_size: 128
+  use_wandb: false
+  # null | class_based | action_error — train.yaml의 weighting.kind와 동일(SIRIUS 스타일 고정/
+  # 적응 가중치, reference 모델 없는 단순 가중 손실). APO(reference 모델+KTO)는 아직 미구현.
+  weighting_kind: null
+
+# 매 라운드 eval(새 체크포인트 성공률 측정, 헤드리스) 설정.
+eval:
+  num_episodes: 20
+  max_steps: 300
+  eval_seed: 0

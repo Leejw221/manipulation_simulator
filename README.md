@@ -92,20 +92,55 @@ python -m mani_sim.scripts.train resume=true                   # 같은 output_d
 ```bash
 python -m mani_sim.scripts.eval checkpoint_path=outputs/train/square_diffusion/policy_epoch300.pt num_episodes=50
 python -m mani_sim.scripts.eval task=square_stage checkpoint_path=... num_episodes=50   # stage 체크포인트(온라인 stage tracker 자동)
-python -m mani_sim.scripts.eval_openvla --adapter-path outputs/train/square_openvla/lora_final/policy \
-    --stats-path outputs/train/square_openvla/normalization_stats.json --num-episodes 10
+python -m mani_sim.scripts.eval task=square policy_name=openvla policy=openvla \
+    checkpoint_path=outputs/train/square_openvla/lora_final/policy \
+    stats_path=outputs/train/square_openvla/normalization_stats.json num_episodes=10
 ```
 
-### 실시간 시각화
+### 실시간 시각화 (`render=true`)
 ```bash
 # low_dim: MuJoCo 네이티브 뷰어(mjviewer) — DISPLAY 있는 화면에서, MUJOCO_GL unset 필수
 unset MUJOCO_GL
-python -m mani_sim.scripts.live_rollout task=square_low_dim checkpoint_path=... num_episodes=3
+python -m mani_sim.scripts.eval task=square_low_dim checkpoint_path=... num_episodes=3 render=true
 
 # image: 오프스크린(egl) 렌더 + OpenCV 창(mjviewer 온스크린과 동시 사용 시 GL 충돌로 세그폴트 — 실측 지뢰)
-MUJOCO_GL=egl DISPLAY=:1 python -m mani_sim.scripts.live_rollout checkpoint_path=... num_episodes=3
+MUJOCO_GL=egl DISPLAY=:1 python -m mani_sim.scripts.eval checkpoint_path=... num_episodes=3 render=true
 ```
 DISPLAY가 가리키는 화면에 뜸 — 원격 접속 중이고 X forwarding 없으면 안 보일 수 있음.
+OpenVLA는 이 PC 터미널 환경에서 cv2 라이브 뷰어(`render=true`)가 원인 불명으로 멈추는 문제가
+있어(2026-07-19) `render=true` 대신 `save_gif=outputs/openvla_rollout.gif`로 헤드리스 캡처 권장.
+
+### 개입 데이터 수집 (사람이 정책을 배포하고 개입)
+```bash
+# PICO(기본) — 화면에서 실행, PICO 연결 필요
+python -m mani_sim.scripts.collect checkpoint_path=outputs/train/.../policy_epochN.pt
+
+# 키보드 개입, policy_name으로 BC/DiffusionPolicy(low_dim·image) 아무거나 배포 가능
+python -m mani_sim.scripts.collect policy_name=bc_rnn_lowdim intervention_device=keyboard
+```
+
+### 가중치 학습 (SIRIUS 스타일, 옵션)
+사람 개입으로 모은 데이터(action_mode 라벨 포함)를 학습할 때 SIRIUS 원문의 class_based
+고정 가중치나 action_error 적응 가중치를 켤 수 있다(reference 모델 없는 단순 가중 손실 —
+APO의 reference+KTO는 아직 미구현):
+```bash
+python -m mani_sim.scripts.train task.hdf5_path=outputs/intervention/round.hdf5 weighting.kind=class_based
+```
+
+### round.py — SIRIUS/APO round-based HITL 오케스트레이션
+매 라운드 "배포(collect) → 누적(merge_rounds) → 재학습(train, 옵션: 가중치) → 평가(eval)"를
+자동 반복한다. collect/train/eval을 각각 서브프로세스로 그대로 호출하므로(개별 스크립트가
+그대로 검증 대상) round.py 자체는 오케스트레이션만 담당:
+```bash
+python -m mani_sim.scripts.round task=door_cabinet_low_dim policy=diffusion_unet_lowdim \
+    policy_name=diffusion_lowdim \
+    round0_checkpoint=outputs/door_cabinet_low_dim/diffusion_unet_lowdim/policy_epoch300.pt \
+    num_rounds=3 train.weighting_kind=class_based
+```
+`task=<이름>`/`policy=<이름>`(config 그룹 선택)만 하위 프로세스로 전달된다 — `task.xxx=yyy`
+같은 개별 필드 오버라이드는 round.py 호출부에 줘도 전파되지 않는다(각 단계가 독립 hydra
+프로세스). policy_name은 diffusion_lowdim/diffusion(image)/bc_rnn_lowdim만 지원(OpenVLA
+체크포인트 관례가 달라 아직 미지원).
 
 ### 진단 도구
 ```bash
@@ -167,8 +202,8 @@ python -m mani_sim.scripts.train task=can_low_dim num_epochs=50
 python -m mani_sim.scripts.eval task=can_low_dim \
     checkpoint_path=outputs/train/can_low_dim_diffusion_unet_lowdim/policy_epoch50.pt \
     num_episodes=20
-python -m mani_sim.scripts.live_rollout task=can_low_dim \
-    checkpoint_path=outputs/train/can_low_dim_diffusion_unet_lowdim/policy_epoch50.pt
+python -m mani_sim.scripts.eval task=can_low_dim \
+    checkpoint_path=outputs/train/can_low_dim_diffusion_unet_lowdim/policy_epoch50.pt render=true
 ```
 
 위 ①~③은 실제로 실행해 확인했음(데이터 로드·env 생성 성공). ④(학습 실행)는 아직 안 돌려봄 — `lift_low_dim`과 동일한 코드 경로라 동작할 것으로 보이나 [추정].

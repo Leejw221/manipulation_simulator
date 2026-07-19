@@ -4,7 +4,12 @@ gitignore로 유실 반복됐던 스크립트들)를 여기 하나로 합친다.
 
 resume은 `utils/checkpoints.get_latest_epoch_checkpoint`로 `policy_epoch<N>.pt` 중 최신을
 찾아 이어간다(오늘 PC 리부트로 학습이 중간에 죽었을 때 겪은 문제의 재발 방지).
-"""
+
+**가중치 학습(옵션, cfg.weighting.kind)**: round.py가 배포+개입으로 모은 데이터(action_mode
+라벨 포함)로 학습할 때 SIRIUS 스타일 고정 가중치(class_based) 또는 action_error 가중치를
+켤 수 있다 — losses/sirius_loss.py(reference 모델 없는 단순 가중 손실) + weighting/*.py를
+그대로 재사용. **APO(적응형, reference 모델+KTO)는 아직 미구현** — BC/DiffusionPolicy 둘 다
+reference-context(OpenVLA만 있음)가 없어 이번 리팩터 범위에서 제외, 별도 과제로 남김."""
 
 import logging
 import os
@@ -15,6 +20,7 @@ from torch.utils.data import DataLoader
 from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats, save_stats
 from mani_sim.datasets.robomimic_dataset import RobomimicSequenceDataset
 from mani_sim.factory import registry
+from mani_sim.losses.sirius_loss import sirius_loss
 from mani_sim.runners.rollout import rollout_policy
 from mani_sim.utils.checkpoints import get_latest_epoch_checkpoint, save_epoch_checkpoint
 from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_lowdim_keys, task_obs_keys
@@ -37,6 +43,27 @@ class DiffusionTrainer:
         save_stats(stats, os.path.join(cfg.output_dir, "normalization_stats.json"))
         self.normalizer = MinMaxNormalizer(stats)
 
+        self.weighting = None
+        weighting_cfg = cfg.get("weighting", None)
+        weighting_kind = weighting_cfg.kind if weighting_cfg else None
+        extra_keys = ()
+        if weighting_kind == "class_based":
+            from mani_sim.weighting.class_based import ClassBasedWeight
+            self.weighting = ClassBasedWeight(
+                cfg.task.hdf5_path, target_intv=weighting_cfg.target_intv,
+                target_preintv=weighting_cfg.target_preintv, device=device,
+            )
+            extra_keys = ("action_mode",)
+        elif weighting_kind == "action_error":
+            from mani_sim.weighting.action_error import ActionErrorWeight
+            self.weighting = ActionErrorWeight(
+                beta_d=weighting_cfg.beta_d, beta_u=weighting_cfg.beta_u, gamma=weighting_cfg.gamma,
+            )
+            extra_keys = ("action_mode",)
+        elif weighting_kind is not None:
+            raise ValueError(f"weighting.kind={weighting_kind!r} 미지원 (class_based|action_error만) "
+                              "— APO(적응형, reference 모델 필요)는 BC/DiffusionPolicy에 아직 미구현")
+
         cache_mode = "all" if cfg.num_workers >= 1 else "low_dim"  # h5py fork 크래시 회피(지뢰, mani_sim_status.md)
         self.dataset = RobomimicSequenceDataset(
             hdf5_path=cfg.task.hdf5_path,
@@ -46,6 +73,7 @@ class DiffusionTrainer:
             normalizer=self.normalizer,
             rgb_keys=cfg.task.rgb_keys if self.is_image else (),
             hdf5_cache_mode=cache_mode,
+            extra_keys=extra_keys,
         )
         self.dataloader = DataLoader(
             self.dataset, batch_size=cfg.batch_size, shuffle=True,
@@ -98,13 +126,19 @@ class DiffusionTrainer:
             import wandb
         global_step = start_epoch * len(self.dataloader)
         for epoch in range(start_epoch, num_epochs):
-            for batch in self.dataloader:
+            for raw_batch in self.dataloader:
                 batch = {
-                    "obs": {k: v.to(self.device) for k, v in batch["obs"].items()},
-                    "action": batch["action"].to(self.device),
-                    "action_mask": batch["action_mask"].to(self.device),
+                    "obs": {k: v.to(self.device) for k, v in raw_batch["obs"].items()},
+                    "action": raw_batch["action"].to(self.device),
+                    "action_mask": raw_batch["action_mask"].to(self.device),
                 }
-                loss = self.policy.compute_loss(batch)
+                if self.weighting is not None:
+                    action_mode = raw_batch["action_mode"].to(self.device)
+                    per_sample_loss = self.policy.compute_loss(batch, reduction="none")  # (B,)
+                    weight_bt = self.weighting.compute_weights(action_mode, error=per_sample_loss.detach())
+                    loss = sirius_loss(per_sample_loss, weight_bt.mean(dim=1))  # (B,) x (B,) -> scalar
+                else:
+                    loss = self.policy.compute_loss(batch)
 
                 self.optimizer.zero_grad()
                 loss.backward()

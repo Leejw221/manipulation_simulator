@@ -12,7 +12,9 @@ __pycache__/
 # 환경
 .venv/
 
-# 정체 불명/정리 필요(2026-07-19) — 삭제 아니고 일단 커밋 제외, 나중에 확인 후 정리
+# 재생성되는 로그/스크래치 파일 (2026-07-19 정리 완료 — 옛 sweep 스크립트·LIBERO 탐색 잔재는
+# 삭제함, 결과는 EXP-01.md에 이미 기록돼 있어 유실 없음. mani_sim_external/은 앞으로도
+# 개인 클론·1회성 스크립트가 생길 수 있는 자리라 계속 커밋 제외)
 mani_sim_external/
 MUJOCO_LOG.TXT
 pip_install*.log

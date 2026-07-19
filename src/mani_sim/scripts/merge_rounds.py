@@ -1,4 +1,4 @@
-"""여러 라운드 hdf5(각 collect_intervention.py 산출물)를 하나의 누적 데이터셋으로 병합.
+"""여러 라운드 hdf5(각 collect.py 산출물)를 하나의 누적 데이터셋으로 병합.
 
 SIRIUS/APO는 라운드가 쌓일수록 "그 시점까지의 전체 데이터"로 재학습한다(sirius.json의
 "data": "round01.hdf5"처럼 라운드 번호가 누적을 뜻함) — round0(데모)·round1(배포+개입)·

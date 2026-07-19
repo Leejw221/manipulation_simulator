@@ -71,8 +71,11 @@ class DiffusionPolicyLowDim(nn.Module):
         구분 없이 쓸 수 있게 하는 공통 인터페이스(DiffusionPolicyImage._encode와 대응)."""
         return _flatten_obs(obs, self.obs_keys)
 
-    def compute_loss(self, batch):
-        """batch: {'obs': {key: (B,To,Dk)}, 'action': (B,Tp,Da), 'action_mask': (B,Tp)} (전부 정규화된 값)."""
+    def compute_loss(self, batch, reduction="mean"):
+        """batch: {'obs': {key: (B,To,Dk)}, 'action': (B,Tp,Da), 'action_mask': (B,Tp)} (전부 정규화된 값).
+
+        reduction="mean" → 스칼라. reduction="none" → 샘플별 스칼라 (B,)
+        (BCRNNPolicyLowDim.compute_loss와 동일 관례 — SIRIUS류 외부 가중치 결합용)."""
         obs = batch["obs"]
         action = batch["action"]
         action_mask = batch["action_mask"]
@@ -91,9 +94,11 @@ class DiffusionPolicyLowDim(nn.Module):
 
         loss = F.mse_loss(pred_noise, noise, reduction="none")  # (B, Tp, Da)
         mask = action_mask.unsqueeze(-1).float()  # (B, Tp, 1)
-        loss = (loss * mask).sum() / mask.sum().clamp(min=1.0) / self.action_dim
+        masked = loss * mask
 
-        return loss
+        if reduction == "none":
+            return masked.sum(dim=(1, 2)) / mask.sum(dim=(1, 2)).clamp(min=1.0) / self.action_dim  # (B,)
+        return masked.sum() / mask.sum().clamp(min=1.0) / self.action_dim
 
     @torch.no_grad()
     def predict_action_chunk(self, obs):

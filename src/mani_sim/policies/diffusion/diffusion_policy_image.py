@@ -130,7 +130,9 @@ class DiffusionPolicyImage(nn.Module):
         래퍼가 LowDim/Image를 구분 없이 쓸 수 있게 하는 공통 인터페이스."""
         return self._encode(obs)
 
-    def compute_loss(self, batch):
+    def compute_loss(self, batch, reduction="mean"):
+        """reduction="mean" → 스칼라. reduction="none" → 샘플별 스칼라 (B,)
+        (BCRNNPolicyLowDim.compute_loss와 동일 관례 — SIRIUS류 외부 가중치 결합용)."""
         obs, action, action_mask = batch["obs"], batch["action"], batch["action_mask"]
         global_cond = self.get_global_cond(obs)
         noise = torch.randn_like(action)
@@ -141,7 +143,11 @@ class DiffusionPolicyImage(nn.Module):
         pred = self.unet(noisy, timesteps, global_cond)
         loss = F.mse_loss(pred, noise, reduction="none")
         mask = action_mask.unsqueeze(-1).float()
-        return (loss * mask).sum() / mask.sum().clamp(min=1.0) / self.action_dim
+        masked = loss * mask
+
+        if reduction == "none":
+            return masked.sum(dim=(1, 2)) / mask.sum(dim=(1, 2)).clamp(min=1.0) / self.action_dim  # (B,)
+        return masked.sum() / mask.sum().clamp(min=1.0) / self.action_dim
 
     @torch.no_grad()
     def predict_action_chunk(self, obs):

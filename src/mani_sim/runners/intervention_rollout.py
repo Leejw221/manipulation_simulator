@@ -16,21 +16,15 @@ import time
 from collections import deque
 
 import numpy as np
-import torch
 
 from mani_sim.datasets.labels import LABEL_INTV, LABEL_ROLLOUT, relabel_preintv
+from mani_sim.runners.rollout import _build_obs_batch
 
 
-def _predict_chunk(policy, normalizer, obs_history, obs_keys, device):
-    # normalizer 통계는 CPU 텐서 → 정규화는 CPU에서 하고 policy forward만 device로 올린다.
-    obs_batch = {
-        key: torch.as_tensor(
-            np.stack([o[key] for o in obs_history]), dtype=torch.float32
-        ).unsqueeze(0)
-        for key in obs_keys
-    }
-    obs_batch = normalizer.normalize_obs(obs_batch)
-    obs_batch = {k: v.to(device) for k, v in obs_batch.items()}
+def _predict_chunk(policy, normalizer, obs_history, obs_keys, device, rgb_keys=()):
+    """rgb_keys가 주어지면 그 키들은 정규화하지 않고 CHW float[0,1]로만 변환한다(image task 지원
+    — runners/rollout.py의 _build_obs_batch와 동일 규약 재사용, 여기서 중복 구현하지 않음)."""
+    obs_batch = _build_obs_batch(obs_history, obs_keys, rgb_keys, normalizer, device, extra_obs_fn=None)
     chunk = policy.predict_action_chunk(obs_batch)  # (1, Tp, Da), normalized, on device
     chunk = normalizer.unnormalize_action(chunk[0].cpu())  # (Tp, Da), CPU
     return chunk.detach().numpy()

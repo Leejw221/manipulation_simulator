@@ -26,6 +26,18 @@ max_steps: 3000
 grad_accumulation_steps: 8
 save_every: 250
 
+# 가중치 학습(옵션) — round.py가 배포+개입으로 모은 데이터(action_mode 라벨 포함)를 학습할 때
+# 켠다. kind=null이면 기존처럼 비가중 BC/DiffusionPolicy. class_based=SIRIUS 원문 4-class 고정
+# 가중치, action_error=예측오차 기반 적응 가중치 — 둘 다 reference 모델 없는 단순 가중 손실
+# (losses/sirius_loss.py)로 적용. APO(reference 모델+KTO)는 BC/DiffusionPolicy에 아직 미구현.
+weighting:
+  kind: null  # null | class_based | action_error
+  target_intv: 0.5       # class_based 전용(SIRIUS 원문 기본값)
+  target_preintv: 0.002  # class_based 전용
+  beta_d: 1.0             # action_error 전용
+  beta_u: 1.0
+  gamma: 1.0
+
 resume: false
 # manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)에서 <task>/<model> 중첩까지만
 # 맞춘다 - <session> 타임스탬프까지 넣으면 매 실행마다 새 폴더가 생겨 resume=true(output_dir

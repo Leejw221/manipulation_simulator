@@ -13,3 +13,11 @@ device: cuda
 # 지정하면 rollout 직전 np.random.seed(eval_seed) 호출 — 너트 초기 위치 시퀀스를 고정해서
 # 서로 다른 체크포인트를 "같은 200개 시나리오"로 평가(공정 비교, 어려운 배치 쏠림 방지).
 eval_seed: null
+# 지정 안 하면 dirname(checkpoint_path)/normalization_stats.json로 추정(DP 저장 관례).
+# policy_name=openvla는 checkpoint_path가 {output_dir}/lora_final/policy라 dirname이
+# 한 단계 더 깊음(stats는 {output_dir}/normalization_stats.json) — 이 경우 명시 필수.
+stats_path: null
+# policy_name=openvla 전용
+openvla_instruction: null  # null이면 datasets/openvla_dataset.SQUARE_INSTRUCTION 사용
+save_gif: null  # 지정하면 첫 에피소드의 agentview 프레임을 GIF로 저장(cv2 라이브 뷰어
+# 대안 — 2026-07-19, 이 PC 터미널에서 cv2.namedWindow가 원인 불명으로 멈추는 문제 회피용)

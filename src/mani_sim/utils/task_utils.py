@@ -1,5 +1,5 @@
 """task config(low_dim vs image) 판별 + eval env 생성 — runners/diffusion_trainer.py와
-scripts/eval.py·scripts/live_rollout.py가 공유(중복 방지)."""
+scripts/eval.py가 공유(중복 방지)."""
 
 
 def is_image_task(task_cfg):
