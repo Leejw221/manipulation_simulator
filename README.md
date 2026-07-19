@@ -60,34 +60,63 @@ hf_hub_download(
 )
 ```
 
+## 구조 (moai_policy/flare 컨벤션)
+
+`policy_name`/`runner_name`(factory registry 키)로 정책·학습루프를 갈아 끼운다 — 알고리즘마다
+스크립트를 복붙하지 않는다(`docs/plan.md` §9 백로그, 실제로 처리함).
+
+```
+factory.py                  # registry: create_policy(name, task_cfg, policy_cfg), get_runner_class(name)
+policies/<algo>/*_registrations.py   # 각 정책을 @registry.register_policy(...)로 등록
+runners/{diffusion_trainer,openvla_trainer}.py   # 실제 학습 루프(정책 종류 모름, config로 분기)
+scripts/{train,eval}.py     # 얇은 hydra 진입점 — policy_name/runner_name만 바꾸면 재사용
+utils/{checkpoints,task_utils}.py    # resume·low_dim/image 판별 공용 유틸
+```
+
+등록된 policy: `bc_rnn_lowdim` · `diffusion_lowdim`(구, low_dim 전용) · `diffusion`(image, 기본값) · `openvla`.
+등록된 runner: `diffusion_trainer` · `openvla_trainer`.
+
 ## 사용법
 
 ### 학습
 ```bash
-python -m mani_sim.scripts.train                    # configs/train.yaml 기본값
-python -m mani_sim.scripts.train num_epochs=50       # hydra 오버라이드
+python -m mani_sim.scripts.train                              # configs/train.yaml 기본값(square, diffusion, image)
+python -m mani_sim.scripts.train task=square_stage             # stage conditioning 켜기
+python -m mani_sim.scripts.train task=square_low_dim policy=diffusion_unet_lowdim policy_name=diffusion_lowdim  # 구 low_dim 경로
+python -m mani_sim.scripts.train policy=openvla policy_name=openvla runner_name=openvla_trainer batch_size=2 max_steps=3000
+python -m mani_sim.scripts.train resume=true                   # 같은 output_dir의 최신 체크포인트/adapter에서 이어받기
 ```
-체크포인트·정규화 통계는 `outputs/train/<task>_<policy>/`에 저장됨. wandb 로깅은 `use_wandb: true`(기본값)로 켜져 있음 — `~/.netrc`에 wandb 로그인 필요.
+체크포인트·정규화 통계는 `outputs/train/<task>_<policy>/`에 저장됨(OpenVLA는 `lora_latest/policy`·`lora_step<N>/policy`). wandb는 `use_wandb=true`로 켜기(`~/.netrc`에 로그인 필요, 기본은 꺼짐).
 
 ### 평가 (rollout, 화면 렌더링 없이)
 ```bash
-python -m mani_sim.scripts.eval \
-    checkpoint_path=outputs/train/lift_low_dim_diffusion_unet_lowdim/policy_epoch50.pt \
-    num_episodes=20
+python -m mani_sim.scripts.eval checkpoint_path=outputs/train/square_diffusion/policy_epoch300.pt num_episodes=50
+python -m mani_sim.scripts.eval task=square_stage checkpoint_path=... num_episodes=50   # stage 체크포인트(온라인 stage tracker 자동)
+python -m mani_sim.scripts.eval_openvla --adapter-path outputs/train/square_openvla/lora_final/policy \
+    --stats-path outputs/train/square_openvla/normalization_stats.json --num-episodes 10
 ```
 
-### 실시간 시각화 (MuJoCo 뷰어 창)
+### 실시간 시각화
 ```bash
-unset MUJOCO_GL   # 반드시 unset — egl로 두면 오프스크린 강제라 창이 안 뜸
-python -m mani_sim.scripts.live_rollout \
-    checkpoint_path=outputs/train/lift_low_dim_diffusion_unet_lowdim/policy_epoch50.pt \
-    num_episodes=3 max_steps=200
+# low_dim: MuJoCo 네이티브 뷰어(mjviewer) — DISPLAY 있는 화면에서, MUJOCO_GL unset 필수
+unset MUJOCO_GL
+python -m mani_sim.scripts.live_rollout task=square_low_dim checkpoint_path=... num_episodes=3
+
+# image: 오프스크린(egl) 렌더 + OpenCV 창(mjviewer 온스크린과 동시 사용 시 GL 충돌로 세그폴트 — 실측 지뢰)
+MUJOCO_GL=egl DISPLAY=:1 python -m mani_sim.scripts.live_rollout checkpoint_path=... num_episodes=3
 ```
-DISPLAY가 가리키는 화면에 뜸 — 원격 접속 중이고 X forwarding 없으면 안 보일 수 있음. 마우스로 카메라 회전·줌 가능. 에피소드가 바뀔 때(`env.reset()`) 창이 한 번씩 깜빡이는 건 robosuite 정상 동작(공식 teleop 스크립트도 동일).
+DISPLAY가 가리키는 화면에 뜸 — 원격 접속 중이고 X forwarding 없으면 안 보일 수 있음.
+
+### 진단 도구
+```bash
+python -m mani_sim.scripts.label_stages --hdf5 data/robomimic/square/ph/v1.5/square/ph/square_image_v15.hdf5
+python -m mani_sim.scripts.stage_counterfactual --checkpoint outputs/train/square_stage_diffusion/policy_epoch300.pt
+```
 
 ## 지원 task
 
-현재 config가 준비된 것: **`lift_low_dim`**, **`can_low_dim`** (`configs/task/`).
+**image(기본, 접미사 없음)**: `square`(=agentview+wrist 84×84), `square_stage`(+stage_onehot 7-dim).
+**low_dim(레거시, `_low_dim` 접미사로 구분)**: `lift_low_dim`, `can_low_dim`, `square_low_dim`, `square_low_dim_stage`.
 
 robomimic이 공식 지원하는 다른 task (아직 config 미작성):
 

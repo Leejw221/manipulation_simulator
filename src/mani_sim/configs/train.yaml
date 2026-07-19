@@ -1,20 +1,36 @@
 defaults:
-  - task: lift_low_dim
-  - policy: diffusion_unet_lowdim
+  - task: square
+  - policy: diffusion_unet
   - _self_
 
+# policy_name/runner_name = factory registry 키. policy.name(위 task/policy yaml의 name 필드)은
+# 사람이 읽는 라벨일 뿐이고, 실제 어떤 클래스를 만들지는 이 둘이 정한다.
+policy_name: diffusion
+runner_name: diffusion_trainer
+
 seed: 0
-batch_size: 64
-# num_workers=0 고정: robomimic SequenceDataset이 내부 h5py 파일 핸들을 지연 생성(lazy)해서 갖고 있어
-# 멀티프로세스 DataLoader(num_workers>0)로 워커 프로세스에 피클링될 때 안전한지 검증 안 함 [미확인].
-# 실제 학습 규모를 키울 때 확인 후 올릴 것.
-num_workers: 0
+batch_size: 128
+num_workers: 2
 lr: 1.0e-4
 weight_decay: 1.0e-6
-num_epochs: 100
+num_epochs: 300
 log_every: 50
-ckpt_every_epochs: 10
-output_dir: outputs/train/${task.name}_${policy.name}
+ckpt_every_epochs: 25
+# eval_every_epochs<=0 이면 학습 중 rollout 평가 생략(예: 빠른 스모크).
+eval_every_epochs: 50
+eval_episodes: 20
+eval_max_steps: 300
+
+# OpenVLA(runner_name=openvla_trainer) 전용 — DiffusionTrainer는 무시.
+max_steps: 3000
+grad_accumulation_steps: 8
+save_every: 250
+
+resume: false
+# manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)에서 <task>/<model> 중첩까지만
+# 맞춘다 - <session> 타임스탬프까지 넣으면 매 실행마다 새 폴더가 생겨 resume=true(output_dir
+# 안 최신 체크포인트 자동탐색)가 깨진다.
+output_dir: outputs/${task.name}/${policy.name}
 device: cuda
-use_wandb: true
+use_wandb: false
 wandb_project: mani_sim

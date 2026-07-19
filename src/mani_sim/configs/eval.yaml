@@ -1,9 +1,15 @@
 defaults:
-  - task: lift_low_dim
-  - policy: diffusion_unet_lowdim
+  - task: square
+  - policy: diffusion_unet
   - _self_
+
+policy_name: diffusion
 
 checkpoint_path: ???
 num_episodes: 50
-max_steps: 400
+max_steps: 300
+render: false
 device: cuda
+# 지정하면 rollout 직전 np.random.seed(eval_seed) 호출 — 너트 초기 위치 시퀀스를 고정해서
+# 서로 다른 체크포인트를 "같은 200개 시나리오"로 평가(공정 비교, 어려운 배치 쏠림 방지).
+eval_seed: null

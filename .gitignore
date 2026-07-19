@@ -11,3 +11,9 @@ __pycache__/
 
 # 환경
 .venv/
+
+# 정체 불명/정리 필요(2026-07-19) — 삭제 아니고 일단 커밋 제외, 나중에 확인 후 정리
+mani_sim_external/
+MUJOCO_LOG.TXT
+pip_install*.log
+scratchpad_start.txt

@@ -1,0 +1,6 @@
+name: openvla
+model_id: openvla/openvla-7b
+lora_rank: 32
+lora_alpha: 16
+load_in_4bit: false
+policy_adapter_path: null

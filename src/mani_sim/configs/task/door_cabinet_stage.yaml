@@ -1,0 +1,19 @@
+name: door_cabinet_stage
+env_name: DoorCabinet
+robots: Panda
+gripper_types: RobotiqThreeFingerGripper
+hdf5_path: data/door_cabinet/door_cabinet_demos_image.hdf5
+camera_names: [agentview, robot0_eye_in_hand]
+image_size: 84
+rgb_keys: [agentview_image, robot0_eye_in_hand_image]
+# stage_onehot: label_stages.py --task door_cabinet 가 hdf5에 미리 기록해둔 6-dim one-hot
+# (datasets/stage_labeler.py STAGE_NAMES_DOOR). door_cabinet.yaml과 이 필드 하나만 다르다.
+# 2026-07-18: 손잡이 거리 파동(감소-증가-감소-증가) heuristic 라벨 - gripper close 신호가
+# 이 데이터엔 없어서(그리퍼 안 오므리고 열린 채로 조작) 위치 기반으로 라벨링함.
+lowdim_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, stage_onehot]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 11
+  stage_onehot: 6
+action_dim: 7

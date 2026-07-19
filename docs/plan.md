@@ -170,7 +170,28 @@ robomimic 자체는 시뮬레이터가 아니라 데모 학습 프레임워크. 
 - 두 번째 벤치마크 후보 (LIBERO 등) — 격리 원칙만 지키고 후보 선정은 보류
 - 가중치 loss(Sirius weighted BC / APO KTO-style)의 구현 위치 — policy 내부 vs runner, 해당 단계에서 결정
 
-## 9. 백로그 — 학습 스크립트 registry/factory 리팩터링 (2026-07-16, 보류)
+## 9. 학습 스크립트 registry/factory 리팩터링 [완료, 2026-07-17]
+
+**처리됨** — `src/mani_sim/factory.py`(registry: policy는 빌더 함수, runner는 클래스),
+`runners/{diffusion_trainer,openvla_trainer}.py`(bc/diffusion/openvla × low_dim/image ×
+stage 유무를 이 두 러너로 전부 커버), `policies/*/​*_registrations.py`(각 정책을
+`@registry.register_policy`로 등록), `scripts/{train,eval}.py`(policy_name/runner_name만
+바꾸면 재사용, 얇은 오케스트레이션). 이번엔 전부 git 추적 위치(`src/`)에 있어 이전처럼
+`outputs/`(gitignore)에 있다가 새 머신에서 유실되는 일이 없다.
+
+**추가로 얻은 것**: `utils/checkpoints.py`(resume 지원 — epoch/step 기준 최신 체크포인트
+자동 탐색). 이 과정에서 **실제 버그 발견·수정**: `OpenVLAPolicy`가 저장된 LoRA를
+`PeftModel.from_pretrained`로 로드할 때 `is_trainable=True`를 안 줘서 resume 시
+"optimizer got an empty parameter list"로 즉시 실패하던 것 — resume 경로를 이번에 처음
+실제로 밟아보며 드러남(그 전엔 `policy_adapter_path`가 rollout 전용으로만 쓰여 안 걸림).
+
+**검증**: 오늘 학습해둔 실제 체크포인트(vanilla epoch250 SR 78.5%→새 경로 n=20 65%,
+stage epoch250 SR 81.5%→새 경로 n=20 80%, 둘 다 샘플링 노이즈 범위 안)로 하위호환 확인.
+DP(low_dim/image)·OpenVLA 전부 학습→resume→평가 왕복 스모크 통과.
+
+원래 백로그(아래, 히스토리 보존):
+
+### 원 문제 (2026-07-16 작성 시점)
 
 **문제**: §2 설계원칙1("구조는 flare 컨벤션을 따른다")이 실제로는 지켜지지 않고 있음 — 지금
 `outputs/train_robomimic_{bc,rabc,sirius,apo}.py`·`train_bc.py`·`train_image.py`처럼

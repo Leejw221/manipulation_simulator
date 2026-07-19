@@ -1,0 +1,15 @@
+name: door_cabinet_low_dim
+env_name: DoorCabinet
+robots: Panda
+gripper_types: RobotiqThreeFingerGripper
+hdf5_path: data/door_cabinet/door_cabinet_demos.hdf5
+obs_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, object]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 11
+  # object = handle_pos(3) + hinge_qpos(1) + handle_to_eef(3), robosuite가 modality="object"
+  # 센서를 전부 합쳐서 반환하는 단일 키 (Lift/Square와 동일 관례). 2026-07-18: 물체(큐브)
+  # 제거로 13 -> 7로 변경됨.
+  object: 7
+action_dim: 7

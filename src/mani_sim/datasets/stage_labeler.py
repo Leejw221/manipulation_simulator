@@ -125,6 +125,107 @@ def stage_progress(stage, num=NUM_STAGES):
     return progress
 
 
+STAGE_NAMES_DOOR = ["approach", "align", "pull_open", "push_close", "withdraw", "return"]
+NUM_STAGES_DOOR = len(STAGE_NAMES_DOOR)
+
+# door 배치 랜덤화 폭이 작아서(x:[0.07,0.09],y:[-0.01,0.01] 오프셋) 고정 근사값으로 충분
+# (2026-07-18 실측 handle_pos 여러 번: 대략 x=-0.13,y=-0.25,z=1.075).
+NOMINAL_HANDLE_POS = np.array([-0.13, -0.25, 1.075])
+NEAR_HANDLE = 0.08
+RETURN_DIST = 0.08        # DoorCabinet._check_success()의 RETURN_DIST_THRESHOLD와 동일
+MIN_RUN = 8                # 노이즈 방지: 이 프레임 수 이상 연속 증가/감소해야 극점으로 인정
+
+
+def _smooth(x, w=5):
+    if len(x) < w:
+        return x
+    kernel = np.ones(w) / w
+    pad = w // 2
+    xp = np.concatenate([np.full(pad, x[0]), x, np.full(pad, x[-1])])
+    return np.convolve(xp, kernel, mode="valid")[: len(x)]
+
+
+def _next_local_min(x, start, end):
+    """[start,end) 안에서 x가 감소하다 증가로 바뀌는 첫 지점(지역 최소)."""
+    for t in range(start + MIN_RUN, end - MIN_RUN):
+        if x[t] <= x[t - MIN_RUN] and x[t] <= x[t + MIN_RUN] and x[t] < x[start]:
+            # 이 지점 이후로도 계속 오르는지(진짜 극소인지) 확인
+            if x[min(t + MIN_RUN, end - 1)] > x[t]:
+                return t
+    return int(start + np.argmin(x[start:end])) if end > start else start
+
+
+def _next_local_max(x, start, end):
+    for t in range(start + MIN_RUN, end - MIN_RUN):
+        if x[t] >= x[t - MIN_RUN] and x[t] >= x[t + MIN_RUN] and x[t] > x[start]:
+            if x[min(t + MIN_RUN, end - 1)] < x[t]:
+                return t
+    return int(start + np.argmax(x[start:end])) if end > start else start
+
+
+def _boundaries_door(eef, t_intv_start):
+    """[t_align, t_min1, t_peak, t_min2, t_return] (advance-only).
+
+    실측(2026-07-18, 30 에피소드): 그리퍼를 닫지 않고(열린 채로 3지 그리퍼로 손잡이를
+    걸어서) 밀고 당김 - action[6](그리퍼 채널)이 개입 내내 -1(open) 고정이라 grasp
+    상태로는 구간을 못 나눔(첫 시도, 버그로 확인됨). 대신 "고정 손잡이 위치까지 거리"가
+    감소(접근/열기 위해 당김)->증가(문이 열리며 손잡이가 원위치에서 멀어짐)->감소(밀어서
+    닫으며 손잡이가 원위치로 복귀)->증가(놓고 복귀)의 뚜렷한 4구간 파동을 그린다 - 이
+    파동의 극점(지역 최소/최대)으로 경계를 나눈다.
+
+    t_intv_start 이전(개입 전 zero-action stub 구간, 로봇 정지)은 탐색에서 제외한다.
+    """
+    T = len(eef)
+    dist_handle = _smooth(np.linalg.norm(eef - NOMINAL_HANDLE_POS, axis=1))
+    initial_eef_pos = eef[0]
+
+    t_min1 = _next_local_min(dist_handle, t_intv_start, T)   # 첫 접근(당기기 시작점)
+    t_peak = _next_local_max(dist_handle, t_min1, T)          # 문 최대로 열린 시점
+    t_min2 = _next_local_min(dist_handle, t_peak, T)          # 밀어서 다시 손잡이 근접
+
+    # align: t_min1 직전, 손잡이 근접권(NEAR_HANDLE)에 처음 들어온 시점
+    idx = np.arange(T)
+    w = np.where((idx >= t_intv_start) & (idx < t_min1) & (dist_handle < NEAR_HANDLE))[0]
+    t_align = int(w[0]) if len(w) else t_min1
+
+    # withdraw 끝(복귀 시작): t_min2 이후 초기 위치까지 거리가 넉넉히 가까워지는 시점
+    dist_initial = np.linalg.norm(eef - initial_eef_pos, axis=1)
+    w2 = np.where((idx > t_min2) & (dist_initial < RETURN_DIST * 2))[0]
+    t_return = int(w2[0]) if len(w2) else T
+
+    ts = [t_align, t_min1, t_peak, t_min2, t_return]
+    for i in range(1, len(ts)):
+        ts[i] = max(ts[i], ts[i - 1])
+    return ts
+
+
+def label_stages_door_cabinet(obs, actions, action_mode):
+    """obs(dict) + actions(T,7, 미사용) + action_mode(T,) -> (T,) int stage. 필요 키: robot0_eef_pos.
+
+    actions는 인터페이스 호환을 위해 받지만 안 쓴다(그리퍼 채널이 이 데이터에서 신호가
+    없어서 - 위 _boundaries_door docstring 참고). action_mode: datasets/labels.py의
+    LABEL_INTV(1)/LABEL_ROLLOUT(0)/LABEL_PREINTV(-10) 스킴 - 개입 시작 전 구간을 탐색에서
+    제외한다.
+    """
+    eef = np.asarray(obs["robot0_eef_pos"], dtype=np.float64)
+    mode = np.asarray(action_mode)
+    T = len(eef)
+
+    intv_idx = np.where(mode == 1)[0]  # LABEL_INTV
+    t_intv_start = int(intv_idx[0]) if len(intv_idx) else 0
+
+    t_align, t_min1, t_peak, t_min2, t_return = _boundaries_door(eef, t_intv_start)
+
+    stage = np.zeros(T, dtype=np.int64)
+    stage[:t_align] = 0          # approach
+    stage[t_align:t_min1] = 1    # align
+    stage[t_min1:t_peak] = 2     # pull_open
+    stage[t_peak:t_min2] = 3     # push_close
+    stage[t_min2:t_return] = 4   # withdraw
+    stage[t_return:] = 5         # return
+    return stage
+
+
 class OnlineStageTracker:
     """롤아웃 때 프레임별로 현재 stage를 인과적(causal)으로 추정. advance-only.
 

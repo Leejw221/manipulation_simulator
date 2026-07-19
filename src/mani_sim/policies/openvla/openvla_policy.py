@@ -61,7 +61,13 @@ class OpenVLAPolicy(nn.Module):
         if policy_adapter_path is not None:
             # 이전 라운드(예: round0 base) 학습으로 저장된 LoRA를 그대로 로드 — 새 LoRA
             # 초기화(get_peft_model) 대신 학습된 가중치를 씀. rollout·다음 라운드 이어붙이기용.
-            self.model = PeftModel.from_pretrained(base_model, policy_adapter_path, adapter_name="policy")
+            # is_trainable=True 필수: PeftModel.from_pretrained 기본값은 False(추론 전용
+            # 가정) — 이대로 두면 로드된 LoRA 파라미터가 전부 requires_grad=False가 돼서
+            # 이어서 학습(resume)할 때 "optimizer got an empty parameter list"로 즉시
+            # 실패한다(2026-07-17 발견 — resume을 실제로 처음 밟아본 경로).
+            self.model = PeftModel.from_pretrained(
+                base_model, policy_adapter_path, adapter_name="policy", is_trainable=True
+            )
         else:
             lora_config = LoraConfig(
                 r=lora_rank,

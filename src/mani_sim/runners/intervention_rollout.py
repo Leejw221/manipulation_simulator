@@ -65,8 +65,8 @@ def collect_episode(
     control_fps > 0이면 각 스텝을 그 주기에 맞춰 실시간으로 늦춘다(사람이 보고 개입할
     시간 확보). 0이면 페이싱 없이 최대 속도(테스트·오프라인 수집용).
 
-    render_fn이 주어지면 매 스텝 호출하고 False 반환 시 에피소드를 끝낸다(커스텀 뷰어용,
-    render보다 우선). 없고 render=True면 기존 env.render(mode="human")를 쓴다.
+    render_fn(obs_raw)이 주어지면 매 스텝 obs_raw와 함께 호출하고 False 반환 시 에피소드를
+    끝낸다(커스텀 뷰어용, render보다 우선). 없고 render=True면 기존 env.render(mode="human")를 쓴다.
 
     predict_fn(obs_history) -> (T, Da) ndarray로 청크 예측을 대체할 수 있다(예: robomimic
     체크포인트처럼 자체 정규화·RNN 은닉상태를 갖는 정책 — 이 경우 T=1로 매 스텝 재계획해도
@@ -111,7 +111,7 @@ def collect_episode(
         obs_raw, _reward, done, _info = env.step(action)
         obs_history.append(obs_raw)
         if render_fn is not None:
-            if not render_fn():  # 창이 닫히면 에피소드 종료
+            if not render_fn(obs_raw):  # 창이 닫히면 에피소드 종료
                 break
         elif render:
             env.render(mode="human")

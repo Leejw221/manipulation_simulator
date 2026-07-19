@@ -24,16 +24,31 @@ from omegaconf import DictConfig
 from mani_sim.datasets.intervention_writer import write_intervention_hdf5
 from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
 from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats
-from mani_sim.envs.robomimic.factory import make_lowdim_env
+from mani_sim.envs.robomimic.factory import make_image_env, make_lowdim_env
 from mani_sim.policies.diffusion.diffusion_policy import DiffusionPolicyLowDim
 from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
+from mani_sim.utils.task_utils import is_image_task, task_obs_keys
 
 
 def _build_diffusion_predict_fn(cfg, device, action_horizon):
-    """기존 경로: 우리 자체 DiffusionPolicyLowDim + MinMaxNormalizer, 청크(action_horizon>1) 재사용."""
+    """기존 경로: 우리 자체 DiffusionPolicyLowDim + MinMaxNormalizer, 청크(action_horizon>1) 재사용.
+
+    checkpoint_path=None + hdf5_path도 아직 없으면(새 task의 첫 수집, round0) 신경망 자체를
+    안 만들고 제자리(zero-action) stub을 쓴다 - 어차피 PICO 개입이 매 스텝 override하니
+    무작위 초기화 정책을 굳이 돌려 로봇이 개입 전에 제멋대로 움직이게 둘 이유가 없다.
+    """
+    import os
+
     from mani_sim.runners.intervention_rollout import _predict_chunk
 
-    normalizer = MinMaxNormalizer(compute_minmax_stats(cfg.task.hdf5_path, cfg.task.obs_keys))
+    if cfg.checkpoint_path is None and not os.path.exists(cfg.task.hdf5_path):
+        print(f"hdf5 없음({cfg.task.hdf5_path}) + checkpoint 없음 -> 정책 없이 제자리(zero-action) "
+              "stub 사용 (round0 첫 수집 - 개입 켜기 전엔 로봇이 가만히 있음)")
+        zero_chunk = np.zeros((action_horizon, cfg.task.action_dim), dtype=np.float32)
+        return None, lambda history: zero_chunk
+
+    stats = compute_minmax_stats(cfg.task.hdf5_path, cfg.task.obs_keys)
+    normalizer = MinMaxNormalizer(stats)
     policy = DiffusionPolicyLowDim(
         obs_keys=cfg.task.obs_keys,
         obs_dims=cfg.task.obs_dims,
@@ -111,8 +126,31 @@ def main(cfg: DictConfig):
         policy, env, predict_fn, obs_keys = _build_robomimic_policy_env(cfg, device)
         action_horizon = 1  # robomimic 정책은 매 스텝 재계획(청크 없음)
     else:
-        env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, cfg.task.obs_keys, render=cfg.render)
-        obs_keys = list(cfg.task.obs_keys)
+        gripper_types = cfg.task.get("gripper_types", None)
+        env_kwargs = {}
+        if "outside_color" in cfg.task:
+            env_kwargs["outside_color"] = cfg.task.outside_color
+        if is_image_task(cfg.task):
+            # render=True(사람이 보는 mjviewer 창)와 오프스크린 image obs 렌더는 서로 다른 GL
+            # 컨텍스트 요구라 함께 못 씀(mani_sim의 기존 landmine) — PICO 수집 중엔 사람이
+            # 화면을 봐야 하므로 render=cfg.render 그대로 두고, image obs는 make_image_env가
+            # 알아서 오프스크린으로 렌더한다(EnvRobosuite가 내부적으로 둘 다 처리).
+            env = make_image_env(
+                cfg.task.env_name, cfg.task.robots,
+                list(cfg.task.lowdim_keys), list(cfg.task.rgb_keys),
+                list(cfg.task.camera_names), image_size=cfg.task.image_size,
+                gripper_types=gripper_types, env_kwargs=env_kwargs,
+            )
+            if cfg.render:
+                env.env.has_renderer = True
+                env.env.renderer = "mjviewer"
+            obs_keys = task_obs_keys(cfg.task)
+        else:
+            env = make_lowdim_env(
+                cfg.task.env_name, cfg.task.robots, cfg.task.obs_keys, render=cfg.render,
+                gripper_types=gripper_types, env_kwargs=env_kwargs,
+            )
+            obs_keys = list(cfg.task.obs_keys)
         policy, predict_fn = _build_diffusion_predict_fn(cfg, device, cfg.policy.action_horizon)
         action_horizon = cfg.policy.action_horizon
 
@@ -146,12 +184,36 @@ def main(cfg: DictConfig):
 
             cycler = CameraCycler(env)
             prev_a = [False]
+            # image task면 손목뷰(robot0_eye_in_hand_image)를 별도 cv2 창으로 동시에 띄운다 -
+            # 사람이 조작하면서 "정책이 실제로 볼 화면"을 실시간으로 같이 확인할 수 있게
+            # (2026-07-18 요청: 제3자뷰 + 손목뷰 동시 표시, 제3자뷰는 기존처럼 A로 시점전환).
+            wrist_key = "robot0_eye_in_hand_image"
+            show_wrist = is_image_task(cfg.task) and wrist_key in cfg.task.rgb_keys
+            if show_wrist:
+                import cv2
 
-            def render_fn():
+            # 특정 지점의 정확한 world 좌표가 필요할 때(예: "여기가 목표 지점이어야 한다") -
+            # 그리퍼를 그 자리로 가져가면 1초에 한 번 eef_pos를 콘솔에 찍는다. 스크린샷으로
+            # 좌표를 추측하는 게 계속 안 맞아서 추가함(2026-07-18).
+            step_counter = [0]
+
+            def render_fn(obs_raw):
                 a_btn = bool(intervention.xrt.get_A_button())
                 if a_btn and not prev_a[0]:
                     print(f"\n[시점] {cycler.cycle()}")
                 prev_a[0] = a_btn
+                step_counter[0] += 1
+                if step_counter[0] % cfg.control_fps == 0:
+                    print(f"[eef_pos] {obs_raw['robot0_eef_pos']}")
+                if show_wrist:
+                    img_hwc = np.transpose(np.asarray(obs_raw[wrist_key]), (1, 2, 0))
+                    img_bgr = cv2.cvtColor(
+                        np.clip(img_hwc * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR
+                    )
+                    # 저장(학습용)은 84x84 그대로, 화면 표시만 확대(사람이 보기 편하게).
+                    img_bgr = cv2.resize(img_bgr, (420, 420), interpolation=cv2.INTER_NEAREST)
+                    cv2.imshow("wrist view (robot0_eye_in_hand)", img_bgr)
+                    cv2.waitKey(1)
                 return cycler.render()
     else:
         intervention = KeyboardIntervention(env.env, toggle_key=cfg.toggle_key)
@@ -196,6 +258,12 @@ def main(cfg: DictConfig):
                 break
     finally:
         intervention.close()
+        try:
+            import cv2
+
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
 
     out = write_intervention_hdf5(cfg.output_path, episodes, obs_keys)
     print("저장:", out, "| 총 에피소드:", len(episodes))

@@ -1,110 +1,71 @@
-"""Diffusion Policy(low-dim) 학습 스크립트.
+"""통합 학습 진입점 — policy_name/runner_name(factory registry 키)로 bc/diffusion/openvla ×
+low_dim/image를 전부 이 스크립트 하나로 다룬다. outputs/train_image.py·train_image_stage.py·
+train_openvla_base.py(gitignore라 매번 유실됐던 스크립트들)를 대체.
 
 사용:
-    python -m mani_sim.scripts.train                          # configs/train.yaml 기본값
-    python -m mani_sim.scripts.train num_epochs=1              # 스모크 테스트용 오버라이드
+    # DP(image), 기본 300 epoch
+    python -m mani_sim.scripts.train use_wandb=true
+
+    # DP(image) + stage conditioning
+    python -m mani_sim.scripts.train task=square_stage
+
+    # DP(low_dim), 예전 M2 경로
+    python -m mani_sim.scripts.train task=lift_low_dim policy=diffusion_unet_lowdim policy_name=diffusion_lowdim
+
+    # OpenVLA round0
+    python -m mani_sim.scripts.train policy=openvla policy_name=openvla runner_name=openvla_trainer \
+        batch_size=2 max_steps=3000 use_wandb=true
+
+    # 중단된 학습 이어받기(같은 output_dir의 최신 체크포인트/adapter에서)
+    python -m mani_sim.scripts.train resume=true
 """
 
-import os
+import logging
 
 import hydra
 import torch
-import wandb
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader
 
-from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats, save_stats
-from mani_sim.datasets.robomimic_dataset import RobomimicSequenceDataset
-from mani_sim.policies.diffusion.diffusion_policy import DiffusionPolicyLowDim
+from mani_sim.factory import registry
+
+logger = logging.getLogger(__name__)
 
 
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
 def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
-    os.makedirs(cfg.output_dir, exist_ok=True)
+    logger.info(f"policy={cfg.policy_name} runner={cfg.runner_name} task={cfg.task.name} device={device}")
+
+    runner_cls = registry.get_runner_class(cfg.runner_name)
+
+    if cfg.resume and hasattr(runner_cls, "prepare_for_resume"):
+        runner_cls.prepare_for_resume(cfg)
+
+    policy = registry.create_policy(cfg.policy_name, cfg.task, cfg.policy)
+    n_params = sum(p.numel() for p in policy.parameters())
+    logger.info(f"policy params: {n_params / 1e6:.1f}M")
 
     if cfg.use_wandb:
-        wandb.init(
-            project=cfg.wandb_project,
-            name=f"{cfg.task.name}_{cfg.policy.name}_ep{cfg.num_epochs}",
-            config=OmegaConf.to_container(cfg, resolve=True),
-        )
+        import wandb
+        wandb.init(project=cfg.wandb_project, name=f"{cfg.task.name}_{cfg.policy_name}",
+                   config=OmegaConf.to_container(cfg, resolve=True))
 
-    stats = compute_minmax_stats(cfg.task.hdf5_path, cfg.task.obs_keys)
-    save_stats(stats, os.path.join(cfg.output_dir, "normalization_stats.json"))
-    normalizer = MinMaxNormalizer(stats)
+    runner = runner_cls(cfg, policy, device)
 
-    dataset = RobomimicSequenceDataset(
-        hdf5_path=cfg.task.hdf5_path,
-        obs_keys=cfg.task.obs_keys,
-        obs_horizon=cfg.policy.obs_horizon,
-        pred_horizon=cfg.policy.pred_horizon,
-        normalizer=normalizer,
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        drop_last=True,
-    )
-
-    policy = DiffusionPolicyLowDim(
-        obs_keys=cfg.task.obs_keys,
-        obs_dims=cfg.task.obs_dims,
-        obs_horizon=cfg.policy.obs_horizon,
-        action_dim=cfg.task.action_dim,
-        pred_horizon=cfg.policy.pred_horizon,
-        down_dims=cfg.policy.down_dims,
-        kernel_size=cfg.policy.kernel_size,
-        n_groups=cfg.policy.n_groups,
-        diffusion_step_embed_dim=cfg.policy.diffusion_step_embed_dim,
-        num_train_timesteps=cfg.policy.num_train_timesteps,
-        beta_schedule=cfg.policy.beta_schedule,
-        num_inference_steps=cfg.policy.num_inference_steps,
-    ).to(device)
-
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(cfg.num_epochs * len(dataloader), 1)
-    )
-
-    global_step = 0
-    for epoch in range(cfg.num_epochs):
-        for batch in dataloader:
-            batch = {
-                "obs": {k: v.to(device) for k, v in batch["obs"].items()},
-                "action": batch["action"].to(device),
-                "action_mask": batch["action_mask"].to(device),
-            }
-            loss = policy.compute_loss(batch)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            lr_scheduler.step()
-
-            if global_step % cfg.log_every == 0:
-                print(f"epoch {epoch} step {global_step} loss {loss.item():.4f}")
-                if cfg.use_wandb:
-                    wandb.log(
-                        {"loss": loss.item(), "lr": lr_scheduler.get_last_lr()[0], "epoch": epoch},
-                        step=global_step,
-                    )
-            global_step += 1
-
-        is_last_epoch = epoch == cfg.num_epochs - 1
-        if (epoch + 1) % cfg.ckpt_every_epochs == 0 or is_last_epoch:
-            ckpt_path = os.path.join(cfg.output_dir, f"policy_epoch{epoch + 1}.pt")
-            torch.save(
-                {"model": policy.state_dict(), "cfg": OmegaConf.to_container(cfg, resolve=True)},
-                ckpt_path,
-            )
-            print("saved checkpoint:", ckpt_path)
+    if cfg.runner_name == "openvla_trainer":
+        start_step = runner.resume_start_step() if cfg.resume else 0
+        runner.train(cfg.max_steps, start_step=start_step, save_every=cfg.save_every,
+                     log_every=cfg.log_every, use_wandb=cfg.use_wandb)
+    else:
+        start_epoch = runner.resume_start_epoch() if cfg.resume else 0
+        runner.train(cfg.num_epochs, start_epoch=start_epoch, use_wandb=cfg.use_wandb)
 
     if cfg.use_wandb:
+        import wandb
         wandb.finish()
+
+    logger.info("training complete")
 
 
 if __name__ == "__main__":

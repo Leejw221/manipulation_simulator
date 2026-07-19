@@ -1,96 +1,81 @@
-"""학습된 정책을 화면(DISPLAY)에 실시간 MuJoCo 뷰어로 띄워서 눈으로 확인.
+"""학습된 정책을 화면에 실시간으로 띄워서 눈으로 확인 — low_dim·image 공용.
 
-주의: MUJOCO_GL=egl로 설정된 셸에서는 창이 안 뜬다(오프스크린 강제). 이 스크립트를 실행하는
-터미널에서는 MUJOCO_GL을 unset하거나 설정하지 않은 채로 실행해야 한다. 원격 접속 중이고
-X forwarding이 없으면 DISPLAY가 가리키는 화면에 창이 떠도 사용자 눈에는 안 보일 수 있다.
+low_dim: MuJoCo 네이티브 mjviewer 창(env.render(), DISPLAY 필요, MUJOCO_GL unset).
+image: 오프스크린(egl) 렌더 + OpenCV 창(cv2.imshow). **onscreen(mjviewer)+오프스크린(이미지 obs)을
+동시에 켜면 GL 컨텍스트 충돌로 세그폴트한다(이번 세션에 실측한 지뢰)** — 그래서 image는
+mjviewer를 아예 안 쓰고 cv2로만 그린다. outputs/live_image.py를 이 갈래로 흡수.
 
-rollout.rollout_policy와 로직은 같지만(receding horizon), 매 env.step 후 env.render()를
-호출해야 해서 별도 루프로 둔다.
+두 경로 다 receding-horizon 루프 자체는 runners/rollout.py의 rollout_policy()를 재사용하고
+(on_episode_step 훅으로 렌더만 얹음) — 예전처럼 루프를 통째로 복붙하지 않는다.
 
 사용:
-    python -m mani_sim.scripts.live_rollout checkpoint_path=outputs/train/.../policy_epoch50.pt
+    unset MUJOCO_GL   # low_dim(mjviewer)일 때만 필요
+    python -m mani_sim.scripts.live_rollout checkpoint_path=...
+
+    MUJOCO_GL=egl DISPLAY=:1 python -m mani_sim.scripts.live_rollout \
+        task=square checkpoint_path=... num_episodes=5
 """
 
 import os
 import time
-from collections import deque
 
 import hydra
-import numpy as np
 import torch
 from omegaconf import DictConfig
 
 from mani_sim.datasets.normalization import MinMaxNormalizer, load_stats
-from mani_sim.envs.robomimic.factory import make_lowdim_env
-from mani_sim.policies.diffusion.diffusion_policy import DiffusionPolicyLowDim
+from mani_sim.factory import registry
+from mani_sim.runners.rollout import rollout_policy
+from mani_sim.utils.task_utils import is_image_task, task_obs_keys
 
 
 @hydra.main(config_path="../configs", config_name="eval", version_base=None)
 def main(cfg: DictConfig):
     device = torch.device("cpu")
 
+    policy = registry.create_policy(cfg.policy_name, cfg.task, cfg.policy).to(device)
     ckpt = torch.load(cfg.checkpoint_path, map_location=device, weights_only=False)
-    stats_path = os.path.join(os.path.dirname(cfg.checkpoint_path), "normalization_stats.json")
-    normalizer = MinMaxNormalizer(load_stats(stats_path))
-
-    policy = DiffusionPolicyLowDim(
-        obs_keys=cfg.task.obs_keys,
-        obs_dims=cfg.task.obs_dims,
-        obs_horizon=cfg.policy.obs_horizon,
-        action_dim=cfg.task.action_dim,
-        pred_horizon=cfg.policy.pred_horizon,
-        down_dims=cfg.policy.down_dims,
-        kernel_size=cfg.policy.kernel_size,
-        n_groups=cfg.policy.n_groups,
-        diffusion_step_embed_dim=cfg.policy.diffusion_step_embed_dim,
-        num_train_timesteps=cfg.policy.num_train_timesteps,
-        beta_schedule=cfg.policy.beta_schedule,
-        num_inference_steps=cfg.policy.num_inference_steps,
-    ).to(device)
     policy.load_state_dict(ckpt["model"])
     policy.eval()
 
-    env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, cfg.task.obs_keys, render=True)
-    obs_keys = cfg.task.obs_keys
-    obs_horizon = cfg.policy.obs_horizon
-    action_horizon = cfg.policy.action_horizon
+    stats_path = os.path.join(os.path.dirname(cfg.checkpoint_path), "normalization_stats.json")
+    normalizer = MinMaxNormalizer(load_stats(stats_path))
 
-    for episode in range(cfg.num_episodes):
-        obs_raw = env.reset()
-        env.render()
-        obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
+    image = is_image_task(cfg.task)
+    if image:
+        import cv2
+        from mani_sim.envs.robomimic.factory import make_image_env
+        env = make_image_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.lowdim_keys),
+                              list(cfg.task.rgb_keys), list(cfg.task.camera_names), image_size=cfg.task.image_size)
+        window = f"live {os.path.basename(cfg.checkpoint_path)}"
+        cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
 
-        success = False
-        step_count = 0
-        while step_count < cfg.max_steps:
-            obs_batch = {
-                key: torch.as_tensor(
-                    np.stack([o[key] for o in obs_history]), dtype=torch.float32, device=device
-                ).unsqueeze(0)
-                for key in obs_keys
-            }
-            obs_batch = normalizer.normalize_obs(obs_batch)
-            action_chunk = policy.predict_action_chunk(obs_batch)
-            action_chunk = normalizer.unnormalize_action(action_chunk[0])
+        def on_episode_step(env_, ep, step):
+            frame = env_.render(mode="rgb_array", height=640, width=640, camera_name="agentview")
+            bgr = frame[:, :, ::-1].copy()
+            cv2.putText(bgr, f"ep {ep + 1}/{cfg.num_episodes} step {step}", (10, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.imshow(window, bgr)
+            cv2.waitKey(30)
+    else:
+        from mani_sim.envs.robomimic.factory import make_lowdim_env
+        env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.obs_keys), render=True)
 
-            for t in range(action_horizon):
-                action = action_chunk[t].detach().cpu().numpy()
-                obs_raw, _reward, done, _info = env.step(action)
-                env.render()
-                time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
-                obs_history.append(obs_raw)
-                step_count += 1
+        def on_episode_step(env_, ep, step):
+            env_.render()
+            time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
 
-                if env.is_success()["task"]:
-                    success = True
-                if success or done or step_count >= cfg.max_steps:
-                    break
+    metrics = rollout_policy(
+        env=env, policy=policy, normalizer=normalizer,
+        obs_keys=task_obs_keys(cfg.task), obs_horizon=cfg.policy.obs_horizon,
+        action_horizon=cfg.policy.action_horizon, max_steps=cfg.max_steps, num_episodes=cfg.num_episodes,
+        device=device, rgb_keys=cfg.task.rgb_keys if image else (), on_episode_step=on_episode_step,
+    )
+    print(metrics)
 
-            if success or step_count >= cfg.max_steps:
-                break
-
-        print(f"episode {episode}: success={success} steps={step_count}")
-
+    if image:
+        import cv2
+        cv2.destroyAllWindows()
     env.env.close()  # 뷰어·sim을 명시적으로 정리 (안 하면 종료 시 GLXBadWindow 발생)
 
 
