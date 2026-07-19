@@ -39,6 +39,11 @@ def main():
     p.add_argument("--max-steps", type=int, default=300)
     p.add_argument("--eval-seed", type=int, default=None,
                     help="scripts/eval.py와 동일 관례 — 지정하면 np.random.seed()로 env reset(너트 위치) 시퀀스 고정")
+    p.add_argument("--save-gif", default=None,
+                    help="지정하면 첫 에피소드의 agentview 프레임을 GIF로 저장(라이브 창 없이 "
+                         "헤드리스로 눈으로 확인하는 용도 — 2026-07-19, cv2 라이브 창이 이 PC "
+                         "터미널 환경에서 원인 불명으로 계속 멈춰서(GPU도 안 도는 채로 정지) "
+                         "대안으로 씀). 예: --save-gif outputs/openvla_rollout.gif")
     args = p.parse_args()
 
     from hydra import compose, initialize
@@ -70,16 +75,24 @@ def main():
         obs = env.reset()
         success = False
         steps = 0
+        gif_frames = [] if (args.save_gif and ep == 0) else None
         while steps < args.max_steps:
             img = _to_pil(obs[args.image_key])
             action_norm = policy.predict_action(img, args.instruction)
             action = normalizer.unnormalize_action(torch.as_tensor(action_norm, dtype=torch.float32)).numpy()
             obs, _r, done, _i = env.step(action)
             steps += 1
+            if gif_frames is not None and steps % 2 == 0:  # 매 2프레임마다(용량 절반)
+                frame = env.render(mode="rgb_array", height=224, width=224, camera_name="agentview")
+                gif_frames.append(Image.fromarray(frame))
             if env.is_success()["task"]:
                 success = True
             if success or done or steps >= args.max_steps:
                 break
+        if gif_frames:
+            gif_frames[0].save(args.save_gif, save_all=True, append_images=gif_frames[1:],
+                                duration=60, loop=0, optimize=True)
+            print(f"[rollout] GIF 저장: {args.save_gif} ({len(gif_frames)} 프레임)", flush=True)
         successes.append(success)
         print(f"[rollout] episode {ep}: steps={steps} success={success}", flush=True)
 
