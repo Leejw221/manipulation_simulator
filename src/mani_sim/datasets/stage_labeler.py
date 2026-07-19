@@ -226,6 +226,162 @@ def label_stages_door_cabinet(obs, actions, action_mode):
     return stage
 
 
+STAGE_NAMES_TRANSPORT = [
+    "lid_present", "lid_removed", "trash_delivered", "payload_approach", "payload_handoff",
+    "payload_delivered",
+]
+NUM_STAGES_TRANSPORT = len(STAGE_NAMES_TRANSPORT)
+
+# object obs(TwoArmTransport, 41) 레이아웃 — 2026-07-19 실측 확정([검증-실측], robosuite
+# TwoArmTransport의 raw named sensor 값과 object-state 벡터를 슬라이딩윈도우로 대조해 offset
+# 확인, 추측 아님):
+#   0:3 payload_pos · 3:7 payload_quat · 7:10 trash_pos · 10:14 trash_quat ·
+#   14:17 lid_handle_pos · 17:21 lid_handle_quat · 21:24 target_bin_pos · 24:27 trash_bin_pos ·
+#   27 payload_in_target_bin · 28 trash_in_trash_bin ·
+#   29:32 gripper0_to_payload · 32:35 gripper0_to_lid_handle ·
+#   35:38 gripper1_to_payload · 38:41 gripper1_to_trash
+#
+# 이 데이터셋(PH 200 demo) 실측(30개 확인): trash_in_trash_bin은 항상 payload_in_target_bin보다
+# 먼저 참이 됨(30/30) — target_bin이 trash로 막혀 있어 물리적으로 trash를 먼저 치워야 payload를
+# 놓을 수 있는 구조로 보임[추정, 실측 순서 기반]. robot0는 lid를 다룬 뒤 payload_pos(41 벡터의
+# [0:3])를 start_bin 쪽(y≈-0.45)에서 잡아 옮기고, robot1이 도중에(로봇0이 놓기 10~30스텝 전부터
+# 겹쳐서) grasp해 target_bin 쪽(y≈+0.4)까지 마저 배송한다(payload_pos 시작·끝 좌표 직접 확인
+# — **실제 핸드오프**, 로봇0이 trash는 안 건드리고 payload만 로봇1에 전달). trash는 로봇1이
+# 단독으로 처리(gripper1의 첫 close 구간, d_payload1이 이때는 0.8~0.9로 커서 payload 관련
+# close(0.02~0.15)와 거리로 구분됨).
+#
+# **핸드오프 세부구조 실측(40/40 demo 확인, 2026-07-19 사용자 요청으로 추가 검증)**: robot0가
+# payload를 잡은 뒤(lid_removed 이후 gripper0의 두 번째 close) 두 팔 eef 거리(norm(eef0-eef1))가
+# 뚜렷하게 수렴(예: demo_1은 0.99→0.13)했다가 핸드오프 순간 최소(~0.12~0.14)를 찍고 로봇0이
+# 놓으면서 다시 발산 — "접근(중앙이동)→정렬→넘겨주기→후퇴"가 전 데모에서 일관되게 나타남
+# (Square의 align_B(0.6%만 존재)와 달리 거의 보편적이라 별도 stage로 승격: payload_approach).
+# 후퇴(로봇0 복귀)는 로봇1의 target_bin 이동과 시간이 겹쳐 별도 전역 마일스톤으로 못 잡음(팔
+# 병렬성) — 그래서 여기서 멈추고 6단계로 확정. 두 팔이 시간상 겹쳐 동작(순차적이지 않음, 예:
+# demo_10은 로봇1의 trash 배송이 로봇0의 lid 완전 해제보다 먼저 끝남)하므로 나머지도 전부
+# **전역 마일스톤**(ground-truth 플래그 또는 그리퍼 개폐 이벤트로 크리스프하게 잡히고
+# advance-only로 클램프)만으로 구성해 팔 간 병렬성 문제를 피한다.
+TRANSPORT_GRASP_SEP = 0.055  # Square와 동일 임계(같은 Panda 그리퍼 하드웨어)
+TRANSPORT_OPEN_SEP = 0.06
+TRANSPORT_NEAR_PAYLOAD = 0.15  # gripper1 close 구간이 trash(0.8~0.9)가 아니라 payload(0.02~0.15)인지 구분
+
+
+def _first(mask, default):
+    w = np.where(mask)[0]
+    return int(w[0]) if len(w) else default
+
+
+def _close_open_events(sep, grasp_sep=TRANSPORT_GRASP_SEP, open_sep=TRANSPORT_OPEN_SEP):
+    """sep(T,) -> (close_starts, open_starts) 인덱스 배열(그리퍼 닫힘 시작/열림 시작 시점)."""
+    closed = sep < grasp_sep
+    trans = np.diff(closed.astype(int))
+    return np.where(trans == 1)[0] + 1, np.where(trans == -1)[0] + 1
+
+
+def label_stages_transport(obs):
+    """obs(dict of numpy) → (T,) int stage(0..5). 필요 키: object, robot0_gripper_qpos,
+    robot1_gripper_qpos.
+
+    stage 0 lid_present: robot0이 아직 lid를 안 치움.
+    stage 1 lid_removed: robot0이 lid handle을 한 번 쥐었다 놓음(제거 완료).
+    stage 2 trash_delivered: trash_in_trash_bin=1(robot0이 아직 payload를 안 잡음).
+    stage 3 payload_approach: robot0이 payload를 grasp해 robot1 쪽으로 옮기는 중(핸드오프 전).
+    stage 4 payload_handoff: robot1이 payload를 grasp(핸드오프 발생, 이후 target_bin으로 운반).
+    stage 5 payload_delivered: payload_in_target_bin=1(보통 에피소드 거의 끝).
+    """
+    obj = np.asarray(obs["object"], dtype=np.float64)
+    g0 = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float64)
+    g1 = np.asarray(obs["robot1_gripper_qpos"], dtype=np.float64)
+    T = len(obj)
+    idx = np.arange(T)
+
+    sep0 = g0[:, 0] - g0[:, 1]
+    sep1 = g1[:, 0] - g1[:, 1]
+    trash_flag = obj[:, 28]
+    payload_flag = obj[:, 27]
+    d_payload1 = np.linalg.norm(obj[:, 35:38], axis=1)
+
+    # reset 직후 neutral pose가 우연히 GRASP_SEP 아래일 수 있어(오탐), 첫 "진짜 열림" 이후만 탐색.
+    t_first_open0 = _first(sep0 > TRANSPORT_OPEN_SEP, 0)
+    t_lid_grasp = _first((idx > t_first_open0) & (sep0 < TRANSPORT_GRASP_SEP), T)
+    t_lid_removed = _first((idx > t_lid_grasp) & (sep0 > TRANSPORT_OPEN_SEP), T)
+    t_trash_done = _first(trash_flag > 0.5, T)
+
+    # robot0의 lid_removed 이후 첫 close = payload grasp(lid grasp는 이미 지나감).
+    c0, _o0 = _close_open_events(sep0)
+    c0_after = c0[c0 > t_lid_removed]
+    t_payload_grasp0 = int(c0_after[0]) if len(c0_after) else T
+
+    # robot1의 close 구간들 중 payload에 가까운(=trash 아닌) 첫 구간 시작 = 핸드오프(robot1 grasp).
+    c1, o1 = _close_open_events(sep1)
+    t_handoff = T
+    for cs in c1:
+        later_opens = o1[o1 > cs]
+        oe = int(later_opens[0]) if len(later_opens) else T
+        if oe > cs and d_payload1[cs:oe].min() < TRANSPORT_NEAR_PAYLOAD:
+            t_handoff = cs
+            break
+
+    t_payload_done = _first(payload_flag > 0.5, T)
+
+    ts = [t_lid_removed, t_trash_done, t_payload_grasp0, t_handoff, t_payload_done]
+    for i in range(1, len(ts)):
+        ts[i] = max(ts[i], ts[i - 1])
+    t_lid_removed, t_trash_done, t_payload_grasp0, t_handoff, t_payload_done = ts
+
+    stage = np.zeros(T, dtype=np.int64)
+    stage[:t_lid_removed] = 0
+    stage[t_lid_removed:t_trash_done] = 1
+    stage[t_trash_done:t_payload_grasp0] = 2
+    stage[t_payload_grasp0:t_handoff] = 3
+    stage[t_handoff:t_payload_done] = 4
+    stage[t_payload_done:] = 5
+    return stage
+
+
+class OnlineStageTrackerTransport:
+    """롤아웃 때 프레임별로 현재 stage를 인과적으로 추정(advance-only). label_stages_transport와
+    동일 임계값·정의 공유 — 오프라인은 close~open 구간의 최소거리로 판정하지만, 온라인은 매
+    스텝 "지금 닫혀있고 payload에 가까운가"를 바로 확인해 같은 이벤트를 인과적으로 잡는다."""
+
+    def reset(self):
+        self.stage = 0
+        self._opened0 = False   # reset neutral pose 오탐 방지(로봇0 그리퍼가 한 번 열린 뒤에만 grasp 인정)
+        self._grasped_lid = False
+        self._grasped_payload0 = False
+
+    def step(self, obs):
+        obj = np.asarray(obs["object"], dtype=np.float64)
+        g0 = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float64)
+        g1 = np.asarray(obs["robot1_gripper_qpos"], dtype=np.float64)
+        sep0 = float(g0[0] - g0[1])
+        sep1 = float(g1[0] - g1[1])
+        d_payload1 = float(np.linalg.norm(obj[35:38]))
+        trash_done = obj[28] > 0.5
+        payload_done = obj[27] > 0.5
+
+        if sep0 > TRANSPORT_OPEN_SEP:
+            self._opened0 = True
+        if self._opened0 and sep0 < TRANSPORT_GRASP_SEP:
+            self._grasped_lid = True
+        if self.stage >= 1 and sep0 < TRANSPORT_GRASP_SEP:
+            self._grasped_payload0 = True  # lid_removed(stage>=1) 이후 gripper0 재닫힘 = payload grasp
+
+        s = self.stage
+        if s == 0 and self._grasped_lid and sep0 > TRANSPORT_OPEN_SEP:
+            s = 1
+        if s <= 1 and trash_done:
+            s = 2
+        if s <= 2 and self._grasped_payload0:
+            s = 3
+        if s <= 3 and sep1 < TRANSPORT_GRASP_SEP and d_payload1 < TRANSPORT_NEAR_PAYLOAD:
+            s = 4
+        if s <= 4 and payload_done:
+            s = 5
+
+        self.stage = max(self.stage, s)
+        return self.stage
+
+
 class OnlineStageTracker:
     """롤아웃 때 프레임별로 현재 stage를 인과적(causal)으로 추정. advance-only.
 
@@ -278,3 +434,18 @@ class OnlineStageTracker:
 
         self.stage = max(self.stage, s)
         return self.stage
+
+
+def make_online_tracker(task_name):
+    """task 이름 -> 해당 task용 causal(rollout) stage tracker 인스턴스.
+    task별 object obs 레이아웃이 달라 OnlineStageTracker(Square 전용)를 그대로 못 씀 —
+    diffusion_trainer.py/eval.py가 이 함수를 통해서만 트래커를 만들어야 함(하드코딩 금지)."""
+    if task_name.startswith("transport"):
+        return OnlineStageTrackerTransport()
+    return OnlineStageTracker()
+
+
+def num_stages_for_task(task_name):
+    if task_name.startswith("transport"):
+        return NUM_STAGES_TRANSPORT
+    return NUM_STAGES

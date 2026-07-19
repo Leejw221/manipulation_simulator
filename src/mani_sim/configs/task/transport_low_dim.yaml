@@ -1,0 +1,17 @@
+name: transport_low_dim
+env_name: TwoArmTransport
+robots: [Panda, Panda]
+hdf5_path: data/transport_check/transport/ph/low_dim_v15.hdf5
+obs_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, robot1_eef_pos, robot1_eef_quat, robot1_gripper_qpos, object]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 2
+  robot1_eef_pos: 3
+  robot1_eef_quat: 4
+  robot1_gripper_qpos: 2
+  # object = payload_pos/quat + trash_pos/quat + lid_handle_pos/quat + target_bin_pos +
+  # trash_bin_pos + payload_in_target_bin + trash_in_trash_bin + gripper{0,1}_to_{payload,lid,trash}
+  # (2026-07-19 실측 확정, datasets/stage_labeler.py 상단 주석에 정확한 슬라이스 기록됨)
+  object: 41
+action_dim: 14

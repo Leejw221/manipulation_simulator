@@ -42,6 +42,8 @@ def make_lowdim_env(env_name, robots, obs_keys, render=False, renderer="mjviewer
     kwargs = dict(env_kwargs) if env_kwargs else {}
     if gripper_types is not None:
         kwargs["gripper_types"] = gripper_types
+    if not isinstance(robots, str):
+        robots = list(robots)  # hydra ListConfig -> 네이티브 list(2지 이상 로봇, 예: Transport)
     env = EnvRobosuite(
         env_name=env_name,
         robots=robots,
@@ -78,6 +80,8 @@ def make_image_env(env_name, robots, lowdim_keys, rgb_keys, camera_names, image_
     kwargs = dict(env_kwargs) if env_kwargs else {}
     if gripper_types is not None:
         kwargs["gripper_types"] = gripper_types
+    if not isinstance(robots, str):
+        robots = list(robots)  # hydra ListConfig -> 네이티브 list(2지 이상 로봇, 예: Transport)
     env = EnvRobosuite(
         env_name=env_name,
         robots=robots,

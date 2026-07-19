@@ -1,0 +1,16 @@
+name: transport
+env_name: TwoArmTransport
+robots: [Panda, Panda]
+hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
+camera_names: [agentview, robot0_eye_in_hand, robot1_eye_in_hand]
+image_size: 84
+rgb_keys: [agentview_image, robot0_eye_in_hand_image, robot1_eye_in_hand_image]
+lowdim_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, robot1_eef_pos, robot1_eef_quat, robot1_gripper_qpos]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 2
+  robot1_eef_pos: 3
+  robot1_eef_quat: 4
+  robot1_gripper_qpos: 2
+action_dim: 14

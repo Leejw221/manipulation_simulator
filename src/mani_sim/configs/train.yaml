@@ -28,15 +28,24 @@ save_every: 250
 
 # 가중치 학습(옵션) — round.py가 배포+개입으로 모은 데이터(action_mode 라벨 포함)를 학습할 때
 # 켠다. kind=null이면 기존처럼 비가중 BC/DiffusionPolicy. class_based=SIRIUS 원문 4-class 고정
-# 가중치, action_error=예측오차 기반 적응 가중치 — 둘 다 reference 모델 없는 단순 가중 손실
-# (losses/sirius_loss.py)로 적용. APO(reference 모델+KTO)는 BC/DiffusionPolicy에 아직 미구현.
+# 가중치, action_error=예측오차 기반 적응 가중치, rabc=SARM 논문(arXiv:2509.25358)의
+# Reward-Aligned BC(progress-delta 기반, task에 stage_onehot 라벨이 hdf5에 있어야 함,
+# label_stages.py로 미리 기록) — 셋 다 reference 모델 없는 단순 가중 손실(losses/sirius_loss.py)
+# 로 적용. APO(reference 모델+KTO)는 BC/DiffusionPolicy에 아직 미구현.
 weighting:
-  kind: null  # null | class_based | action_error
+  kind: null  # null | class_based | action_error | rabc
   target_intv: 0.5       # class_based 전용(SIRIUS 원문 기본값)
   target_preintv: 0.002  # class_based 전용
   beta_d: 1.0             # action_error 전용
   beta_u: 1.0
   gamma: 1.0
+  kappa: 0.01              # rabc 전용 — "이미 충분히 좋은 진행" 임계값(SARM 논문 기본값,
+  # lerobot 문서 권장: 데이터셋의 delta_mean 근처로 튜닝. RABCWeight 생성 시 실측
+  # delta_mean/delta_std를 로그로 찍어주니 그 값 보고 조정)
+  epsilon: 1.0e-6          # rabc 전용, 분모 안정화
+  progress_path: null      # rabc 전용, null이면 heuristic stage_progress() 직접 계산.
+  # scripts/compute_sarm_progress.py로 만든 npz 경로를 주면 학습된 SARM reward model의
+  # 예측 progress를 씀(lerobot 실제 파이프라인과 동일 구조).
 
 resume: false
 # manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)에서 <task>/<model> 중첩까지만

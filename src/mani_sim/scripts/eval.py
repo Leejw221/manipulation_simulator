@@ -52,11 +52,12 @@ def _run_dp_eval(cfg, device):
 
     extra_obs_fn = extra_reset_fn = None
     if cfg.task.get("use_online_stage_tracker", False):
-        from mani_sim.datasets.stage_labeler import OnlineStageTracker, onehot as stage_onehot
-        tracker = OnlineStageTracker()
+        from mani_sim.datasets.stage_labeler import make_online_tracker, num_stages_for_task, onehot as stage_onehot
+        tracker = make_online_tracker(cfg.task.name)
+        n_stages = num_stages_for_task(cfg.task.name)
 
         def extra_obs_fn(obs_raw):
-            return stage_onehot(np.array([tracker.step(obs_raw)]))[0]
+            return stage_onehot(np.array([tracker.step(obs_raw)]), num=n_stages)[0]
 
         extra_reset_fn = tracker.reset
 

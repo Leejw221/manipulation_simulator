@@ -1,0 +1,27 @@
+# SARM reward model 학습 설정(scripts/train_sarm.py). task/policy registry와 별개 —
+# reward model은 action을 안 만들어서 기존 policy 인터페이스(compute_loss(batch)->scalar,
+# predict_action_chunk)에 안 맞음, 독립 config로 둔다.
+hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
+image_key: agentview_image
+state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, robot1_eef_pos, robot1_eef_quat, robot1_gripper_qpos]
+state_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 2
+  robot1_eef_pos: 3
+  robot1_eef_quat: 4
+  robot1_gripper_qpos: 2
+image_size: 84
+num_stages: 6
+
+seed: 0
+batch_size: 128
+num_workers: 0
+lr: 1.0e-4
+num_epochs: 20
+log_every: 100
+ckpt_every_epochs: 5
+output_dir: outputs/sarm/transport
+device: cuda
+use_wandb: false
+wandb_project: mani_sim

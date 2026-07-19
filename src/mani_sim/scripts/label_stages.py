@@ -4,6 +4,7 @@ outputs/label_square_stages.py를 대체(경로를 인자로 받게 일반화). 
 사용:
     python -m mani_sim.scripts.label_stages --task square --hdf5 data/robomimic/square/ph/v1.5/square/ph/square_image_v15.hdf5
     python -m mani_sim.scripts.label_stages --task door_cabinet --hdf5 outputs/intervention/door_cabinet_round.hdf5
+    python -m mani_sim.scripts.label_stages --task transport --hdf5 data/transport_check/transport/ph/low_dim_v15.hdf5
 """
 
 import argparse
@@ -13,16 +14,20 @@ import numpy as np
 
 from mani_sim.datasets.stage_labeler import (
     NUM_STAGES_DOOR,
+    NUM_STAGES_TRANSPORT,
     STAGE_NAMES,
     STAGE_NAMES_DOOR,
+    STAGE_NAMES_TRANSPORT,
     label_stages_door_cabinet,
     label_stages_square,
+    label_stages_transport,
     onehot,
 )
 
 TASK_CONFIGS = {
     "square": {"names": STAGE_NAMES, "num": len(STAGE_NAMES)},
     "door_cabinet": {"names": STAGE_NAMES_DOOR, "num": NUM_STAGES_DOOR},
+    "transport": {"names": STAGE_NAMES_TRANSPORT, "num": NUM_STAGES_TRANSPORT},
 }
 
 
@@ -34,6 +39,13 @@ def _compute_stage(task, obs_grp, actions, action_mode):
             "robot0_gripper_qpos": obs_grp["robot0_gripper_qpos"][:],
         }
         return label_stages_square(obs)
+    if task == "transport":
+        obs = {
+            "object": obs_grp["object"][:],
+            "robot0_gripper_qpos": obs_grp["robot0_gripper_qpos"][:],
+            "robot1_gripper_qpos": obs_grp["robot1_gripper_qpos"][:],
+        }
+        return label_stages_transport(obs)
     obs = {"robot0_eef_pos": obs_grp["robot0_eef_pos"][:]}
     return label_stages_door_cabinet(obs, actions, action_mode)
 

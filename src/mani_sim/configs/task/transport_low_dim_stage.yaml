@@ -1,0 +1,22 @@
+name: transport_low_dim_stage
+env_name: TwoArmTransport
+robots: [Panda, Panda]
+hdf5_path: data/transport_check/transport/ph/low_dim_v15.hdf5
+# stage_onehot: label_stages.py(--task transport)가 hdf5에 미리 기록해둔 6-dim one-hot
+# (datasets/stage_labeler.py의 label_stages_transport: lid_present/lid_removed/
+# trash_delivered/payload_approach/payload_handoff/payload_delivered). transport_low_dim.yaml과 이 필드 하나만
+# 다르다. (주의: object가 obs_keys에 그대로 있어 stage가 이미 있는 정보의 결정함수 —
+# 정보 중복이라 공정 비교엔 image 버전(transport_stage.yaml)을 쓸 것. 이 low_dim 버전은
+# 파이프라인 디버깅용으로만 유지.)
+obs_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, robot1_eef_pos, robot1_eef_quat, robot1_gripper_qpos, object, stage_onehot]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 2
+  robot1_eef_pos: 3
+  robot1_eef_quat: 4
+  robot1_gripper_qpos: 2
+  object: 41
+  stage_onehot: 6
+action_dim: 14
+use_online_stage_tracker: true

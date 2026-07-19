@@ -9,7 +9,11 @@ resume은 `utils/checkpoints.get_latest_epoch_checkpoint`로 `policy_epoch<N>.pt
 라벨 포함)로 학습할 때 SIRIUS 스타일 고정 가중치(class_based) 또는 action_error 가중치를
 켤 수 있다 — losses/sirius_loss.py(reference 모델 없는 단순 가중 손실) + weighting/*.py를
 그대로 재사용. **APO(적응형, reference 모델+KTO)는 아직 미구현** — BC/DiffusionPolicy 둘 다
-reference-context(OpenVLA만 있음)가 없어 이번 리팩터 범위에서 제외, 별도 과제로 남김."""
+reference-context(OpenVLA만 있음)가 없어 이번 리팩터 범위에서 제외, 별도 과제로 남김.
+
+**rabc**(2026-07-19 추가) — SARM 논문(arXiv:2509.25358)의 RA-BC를 progress-delta 가중치로
+이식(weighting/rabc.py). class_based/action_error와 인터페이스가 달라(action_mode(B,T) 대신
+demo_id+index_in_demo 필요) 아래서 별도 분기로 처리."""
 
 import logging
 import os
@@ -44,6 +48,7 @@ class DiffusionTrainer:
         self.normalizer = MinMaxNormalizer(stats)
 
         self.weighting = None
+        self.weighting_kind = None
         weighting_cfg = cfg.get("weighting", None)
         weighting_kind = weighting_cfg.kind if weighting_cfg else None
         extra_keys = ()
@@ -60,9 +65,19 @@ class DiffusionTrainer:
                 beta_d=weighting_cfg.beta_d, beta_u=weighting_cfg.beta_u, gamma=weighting_cfg.gamma,
             )
             extra_keys = ("action_mode",)
+        elif weighting_kind == "rabc":
+            from mani_sim.weighting.rabc import RABCWeight
+            self.weighting = RABCWeight(
+                cfg.task.hdf5_path, chunk_size=cfg.policy.action_horizon,
+                kappa=weighting_cfg.kappa, eps=weighting_cfg.epsilon,
+                progress_path=weighting_cfg.get("progress_path", None), device=device,
+            )
+            # demo_id/index_in_demo는 RobomimicSequenceDataset.__getitem__ 기본 반환값이라
+            # extra_keys 불필요(action_mode도 안 씀 — SARM은 라벨 종류와 무관).
         elif weighting_kind is not None:
-            raise ValueError(f"weighting.kind={weighting_kind!r} 미지원 (class_based|action_error만) "
+            raise ValueError(f"weighting.kind={weighting_kind!r} 미지원 (class_based|action_error|rabc) "
                               "— APO(적응형, reference 모델 필요)는 BC/DiffusionPolicy에 아직 미구현")
+        self.weighting_kind = weighting_kind
 
         cache_mode = "all" if cfg.num_workers >= 1 else "low_dim"  # h5py fork 크래시 회피(지뢰, mani_sim_status.md)
         self.dataset = RobomimicSequenceDataset(
@@ -88,14 +103,14 @@ class DiffusionTrainer:
         self._eval_env = None  # lazy(첫 eval 때 생성 — dataloader worker fork 이후가 안전, EXP-01 지뢰)
         self._stage_tracker = None
         if cfg.task.get("use_online_stage_tracker", False):
-            from mani_sim.datasets.stage_labeler import OnlineStageTracker
-            self._stage_tracker = OnlineStageTracker()
+            from mani_sim.datasets.stage_labeler import make_online_tracker
+            self._stage_tracker = make_online_tracker(cfg.task.name)
 
     def _stage_extra_obs_fn(self, obs_raw):
-        from mani_sim.datasets.stage_labeler import onehot as stage_onehot
+        from mani_sim.datasets.stage_labeler import num_stages_for_task, onehot as stage_onehot
         import numpy as np
         s = self._stage_tracker.step(obs_raw)
-        return stage_onehot(np.array([s]))[0]
+        return stage_onehot(np.array([s]), num=num_stages_for_task(self.task_cfg.name))[0]
 
     def resume_start_epoch(self):
         path, epoch = get_latest_epoch_checkpoint(self.cfg.output_dir)
@@ -133,10 +148,14 @@ class DiffusionTrainer:
                     "action_mask": raw_batch["action_mask"].to(self.device),
                 }
                 if self.weighting is not None:
-                    action_mode = raw_batch["action_mode"].to(self.device)
                     per_sample_loss = self.policy.compute_loss(batch, reduction="none")  # (B,)
-                    weight_bt = self.weighting.compute_weights(action_mode, error=per_sample_loss.detach())
-                    loss = sirius_loss(per_sample_loss, weight_bt.mean(dim=1))  # (B,) x (B,) -> scalar
+                    if self.weighting_kind == "rabc":
+                        weight_b = self.weighting.compute_weights(raw_batch["demo_id"], raw_batch["index_in_demo"])
+                    else:
+                        action_mode = raw_batch["action_mode"].to(self.device)
+                        weight_bt = self.weighting.compute_weights(action_mode, error=per_sample_loss.detach())
+                        weight_b = weight_bt.mean(dim=1)
+                    loss = sirius_loss(per_sample_loss, weight_b)  # (B,) x (B,) -> scalar
                 else:
                     loss = self.policy.compute_loss(batch)
 
