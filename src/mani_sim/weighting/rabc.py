@@ -33,11 +33,17 @@ from mani_sim.datasets.stage_labeler import stage_progress
 
 
 class RABCWeight:
-    def __init__(self, hdf5_path, chunk_size, stage_key="stage_onehot", kappa=0.01, eps=1e-6,
+    def __init__(self, hdf5_path, chunk_size, stage_key="stage_onehot", kappa="auto", eps=1e-6,
                  progress_path=None, device=None):
+        """kappa="auto"면 이 데이터셋의 실측 delta_mean으로 자동 설정(2026-07-22 수정) —
+        원래 SARM 논문 기본값(0.01)을 그대로 썼더니, chunk_size/episode_length 비율이 다른
+        task(우리 Transport, 평균 469프레임)에서는 "정상 진행 중" chunk의 delta(~0.017,
+        =chunk_size/평균길이)가 이미 고정 kappa=0.01보다 커서 전체 chunk의 76%가 곧바로
+        weight=1로 포화됨(변별력 소실, 실측 확인). kappa를 task마다 손으로 맞추는 대신
+        delta_mean 기준 자동 계산으로 바꿔 task 길이가 달라져도 일반적으로 작동하게 한다
+        (RA-BC 원문/lerobot 문서도 "데이터셋의 delta_mean 근처로 튜닝" 권장 — 그대로 자동화)."""
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.chunk_size = chunk_size
-        self.kappa = kappa
         self.eps = eps
 
         if progress_path is not None:
@@ -63,8 +69,9 @@ class RABCWeight:
         all_deltas = np.concatenate(deltas)
         self.mu = float(all_deltas.mean())
         self.sigma = float(all_deltas.std())
+        self.kappa = self.mu if kappa == "auto" else kappa
         print(
-            f"RABC weight: chunk_size={chunk_size} kappa={kappa} "
+            f"RABC weight: chunk_size={chunk_size} kappa={self.kappa:.4f}({'auto=delta_mean' if kappa == 'auto' else 'fixed'}) "
             f"delta_mean={self.mu:.4f} delta_std={self.sigma:.4f}",
             flush=True,
         )

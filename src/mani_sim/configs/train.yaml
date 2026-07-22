@@ -33,19 +33,29 @@ save_every: 250
 # label_stages.py로 미리 기록) — 셋 다 reference 모델 없는 단순 가중 손실(losses/sirius_loss.py)
 # 로 적용. APO(reference 모델+KTO)는 BC/DiffusionPolicy에 아직 미구현.
 weighting:
-  kind: null  # null | class_based | action_error | rabc
+  kind: null  # null | class_based | action_error | rabc | phase_rule | action_variance | event_radius
   target_intv: 0.5       # class_based 전용(SIRIUS 원문 기본값)
   target_preintv: 0.002  # class_based 전용
   beta_d: 1.0             # action_error 전용
   beta_u: 1.0
   gamma: 1.0
-  kappa: 0.01              # rabc 전용 — "이미 충분히 좋은 진행" 임계값(SARM 논문 기본값,
-  # lerobot 문서 권장: 데이터셋의 delta_mean 근처로 튜닝. RABCWeight 생성 시 실측
-  # delta_mean/delta_std를 로그로 찍어주니 그 값 보고 조정)
+  kappa: auto              # rabc 전용 — "이미 충분히 좋은 진행" 임계값. "auto"면 이 데이터셋의
+  # 실측 delta_mean으로 자동 설정(2026-07-22 수정, RABCWeight 참고) — 고정값 0.01(SARM 논문
+  # 기본값)을 그대로 쓰면 episode 길이/chunk_size 비율이 다른 task에서 대부분 chunk가
+  # weight=1로 포화돼 변별력을 잃음(Transport 실측: 76% 포화). 숫자를 직접 주면 그대로 씀.
   epsilon: 1.0e-6          # rabc 전용, 분모 안정화
   progress_path: null      # rabc 전용, null이면 heuristic stage_progress() 직접 계산.
   # scripts/compute_sarm_progress.py로 만든 npz 경로를 주면 학습된 SARM reward model의
   # 예측 progress를 씀(lerobot 실제 파이프라인과 동일 구조).
+  critical_weight: 3.0     # phase_rule/event_radius 공용 — critical_stages(진입)에 곱할 가중치
+  critical_stages: [3]     # phase_rule/event_radius 공용, Transport 기본값=payload_handoff(2026-07-21
+  # trash_delivered 제거로 5단계로 축소되며 인덱스 4→3, STAGE_NAMES_TRANSPORT 참고)
+  radius: 20               # event_radius 전용 — critical stage 진입 시점 ±radius 프레임만 가중치
+  # (STAIR Eq.2 스타일. phase_rule은 critical stage 전체 구간에 가중치 — 이 둘을 별도 arm으로
+  # 비교하기 위해 나눔, 2026-07-22)
+  variance_path: null      # action_variance 전용 — scripts/compute_action_variance.py로 만든 npz 경로
+  w_min: 0.2               # action_variance 전용, 가중치 clip 하한
+  w_max: 5.0               # action_variance 전용, 가중치 clip 상한
 
 resume: false
 # manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)에서 <task>/<model> 중첩까지만

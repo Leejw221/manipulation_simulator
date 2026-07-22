@@ -51,12 +51,18 @@ def _build_obs_batch(obs_history, obs_keys, rgb_keys, normalizer, device, extra_
 def rollout_policy(
     env, policy, normalizer, obs_keys, obs_horizon, action_horizon, max_steps, num_episodes, device,
     rgb_keys=(), extra_obs_fn=None, extra_obs_reset_fn=None, on_episode_step=None,
+    save_trajectory_keys=None,
 ):
     """extra_obs_fn: 합성 obs 키 계산 콜백(예: stage_onehot). extra_obs_reset_fn: 에피소드
     시작마다 그 콜백의 내부 상태를 초기화(예: OnlineStageTracker.reset()). on_episode_step:
-    디버깅/시각화용 훅(env, episode_idx, step) — 화면 렌더 등에 사용, 로직에 영향 없음."""
+    디버깅/시각화용 훅(env, episode_idx, step) — 화면 렌더 등에 사용, 로직에 영향 없음.
+
+    save_trajectory_keys: None이면 기존과 동일(집계만 반환). 키 목록(예: ["object",
+    "robot0_gripper_qpos","robot1_gripper_qpos"])을 주면 에피소드별 (T, ...) 배열로 저장해
+    반환 dict의 "trajectories"에 담는다 — RQ1(지표-성공률 상관) 분석용, 학습에는 안 씀."""
     policy.eval()
     successes = []
+    trajectories = [] if save_trajectory_keys is not None else None
 
     for ep in range(num_episodes):
         obs_raw = env.reset()
@@ -65,6 +71,8 @@ def rollout_policy(
         obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
         if on_episode_step is not None:
             on_episode_step(env, ep, 0)
+        ep_log = {k: [np.asarray(obs_raw[k], dtype=np.float32)] for k in save_trajectory_keys} \
+            if save_trajectory_keys is not None else None
 
         success = False
         step_count = 0
@@ -80,6 +88,9 @@ def rollout_policy(
                 obs_raw, _reward, done, _info = env.step(action)
                 obs_history.append(obs_raw)
                 step_count += 1
+                if ep_log is not None:
+                    for k in save_trajectory_keys:
+                        ep_log[k].append(np.asarray(obs_raw[k], dtype=np.float32))
                 if on_episode_step is not None:
                     on_episode_step(env, ep, step_count)
 
@@ -93,9 +104,17 @@ def rollout_policy(
                 break
 
         successes.append(success)
+        if ep_log is not None:
+            trajectories.append({
+                "success": success,
+                **{k: np.stack(v) for k, v in ep_log.items()},
+            })
 
-    return {
+    metrics = {
         "success_rate": float(np.mean(successes)),
         "num_episodes": num_episodes,
         "num_successes": int(np.sum(successes)),
     }
+    if trajectories is not None:
+        metrics["trajectories"] = trajectories
+    return metrics

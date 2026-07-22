@@ -7,6 +7,9 @@ stage 변경 하나로 격리. noise floor(같은 stage·다른 시드)와 비�
 
 사용:
     python -m mani_sim.scripts.stage_counterfactual --checkpoint outputs/train/square_stage_diffusion_unet/policy_epoch300.pt
+    python -m mani_sim.scripts.stage_counterfactual --task transport_stage \
+        --checkpoint outputs/train/transport_stage_diffusion_seed0/policy_epoch500.pt \
+        --hdf5 data/transport_check/transport/ph/transport_image_v15.hdf5
 """
 
 import argparse
@@ -17,18 +20,25 @@ import numpy as np
 import torch
 
 from mani_sim.datasets.normalization import MinMaxNormalizer, load_stats
-from mani_sim.datasets.stage_labeler import NUM_STAGES, STAGE_NAMES, onehot
+from mani_sim.datasets.stage_labeler import (
+    NUM_STAGES, STAGE_NAMES, NUM_STAGES_TRANSPORT, STAGE_NAMES_TRANSPORT, onehot,
+)
 from mani_sim.factory import registry
 
-TASK_NAME = "square_stage"
 OBS_HORIZON = 2
+
+
+def _stage_names_for_task(task_name):
+    if task_name.startswith("transport"):
+        return STAGE_NAMES_TRANSPORT, NUM_STAGES_TRANSPORT
+    return STAGE_NAMES, NUM_STAGES
 
 
 def _to_chw01(img):
     return np.transpose(np.asarray(img, dtype=np.float32) / 255.0, (2, 0, 1))
 
 
-def build_obs(f, demo_key, t, task_cfg, normalizer, device, stage_override=None):
+def build_obs(f, demo_key, t, task_cfg, normalizer, device, num_stages, stage_override=None):
     obs_grp = f["data"][demo_key]["obs"]
     t0 = max(0, t - OBS_HORIZON + 1)
     idx = list(range(t0, t + 1))
@@ -52,7 +62,7 @@ def build_obs(f, demo_key, t, task_cfg, normalizer, device, stage_override=None)
     if stage_override is None:
         stage_frames = np.stack([obs_grp["stage_onehot"][i] for i in idx])
     else:
-        stage_frames = np.stack([onehot(np.array([stage_override]))[0] for _ in idx])
+        stage_frames = np.stack([onehot(np.array([stage_override]), num=num_stages)[0] for _ in idx])
     stage_t = torch.as_tensor(stage_frames, dtype=torch.float32).unsqueeze(0)
     batch["stage_onehot"] = normalizer.normalize_obs({"stage_onehot": stage_t})["stage_onehot"]
 
@@ -69,16 +79,19 @@ def predict(policy, obs_batch, device, seed):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--task", default="square_stage")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--hdf5", default="data/robomimic/square/ph/v1.5/square/ph/square_image_v15.hdf5")
     p.add_argument("--num-samples", type=int, default=40)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
+    stage_names, num_stages = _stage_names_for_task(args.task)
+
     from hydra import compose, initialize
 
     with initialize(config_path="../configs", version_base=None):
-        cfg = compose(config_name="eval", overrides=[f"task={TASK_NAME}", "policy_name=diffusion"])
+        cfg = compose(config_name="eval", overrides=[f"task={args.task}", "policy_name=diffusion"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rng = np.random.default_rng(args.seed)
@@ -96,7 +109,7 @@ def main():
     demo_keys = list(f["data"].keys())
 
     swap_dists, noise_floor_dists = [], []
-    per_stage_swap = {s: [] for s in range(NUM_STAGES)}
+    per_stage_swap = {s: [] for s in range(num_stages)}
 
     for _ in range(args.num_samples):
         dk = demo_keys[rng.integers(len(demo_keys))]
@@ -104,16 +117,16 @@ def main():
         t = int(rng.integers(OBS_HORIZON - 1, T))
         real_stage = int(f["data"][dk]["obs"]["stage_onehot"][t].argmax())
 
-        obs_real = build_obs(f, dk, t, cfg.task, normalizer, device, stage_override=None)
+        obs_real = build_obs(f, dk, t, cfg.task, normalizer, device, num_stages, stage_override=None)
         seed_a, seed_b = int(rng.integers(1e6)), int(rng.integers(1e6))
         action_real = predict(policy, obs_real, device, seed_a)
         action_real_2 = predict(policy, obs_real, device, seed_b)
         noise_floor_dists.append(float(np.linalg.norm(action_real - action_real_2)))
 
-        other_stage = int(rng.integers(NUM_STAGES))
+        other_stage = int(rng.integers(num_stages))
         while other_stage == real_stage:
-            other_stage = int(rng.integers(NUM_STAGES))
-        obs_swap = build_obs(f, dk, t, cfg.task, normalizer, device, stage_override=other_stage)
+            other_stage = int(rng.integers(num_stages))
+        obs_swap = build_obs(f, dk, t, cfg.task, normalizer, device, num_stages, stage_override=other_stage)
         action_swap = predict(policy, obs_swap, device, seed_a)
 
         d = float(np.linalg.norm(action_real - action_swap))
@@ -132,10 +145,10 @@ def main():
           "ratio ~ 1 이면 stage를 사실상 무시(주입이 안 먹힘).\n")
 
     print("[cf] stage별 swap distance (그 stage에서 다른 stage로 바꿨을 때):")
-    for s in range(NUM_STAGES):
+    for s in range(num_stages):
         vals = per_stage_swap[s]
         if vals:
-            print(f"    {STAGE_NAMES[s]:12s} n={len(vals):3d}  mean={np.mean(vals):.4f}")
+            print(f"    {stage_names[s]:12s} n={len(vals):3d}  mean={np.mean(vals):.4f}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,36 @@
 name: transport
 env_name: TwoArmTransport
 robots: [Panda, Panda]
+# env_configuration: 데이터 수집 때 실제 로봇 배치(hdf5 env_args에 저장돼 있던 값). robosuite
+# 기본값('default')과 달라서, 안 주면 두 로봇이 학습 데이터와 다른 위치에 서서 시뮬레이션됨
+# (2026-07-21 실측: 학습데이터 states로 리셋 후 실제 데모 액션을 재생해도 실패하는 것으로 발견 —
+# 정책 문제가 아니라 이 파라미터 누락이 원인이었음).
+env_kwargs:
+  env_configuration: single-arm-opposed
+  lite_physics: false
+  controller_configs:
+    type: BASIC
+    body_parts:
+      right:
+        type: OSC_POSE
+        input_max: 1
+        input_min: -1
+        output_max: [0.05, 0.05, 0.05, 0.5, 0.5, 0.5]
+        output_min: [-0.05, -0.05, -0.05, -0.5, -0.5, -0.5]
+        kp: 150
+        damping: 1
+        impedance_mode: fixed
+        kp_limits: [0, 300]
+        damping_limits: [0, 10]
+        position_limits: null
+        orientation_limits: null
+        uncouple_pos_ori: true
+        control_delta: true
+        interpolation: null
+        ramp_ratio: 0.2
+        input_ref_frame: world
+        gripper:
+          type: GRIP
 hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
 camera_names: [agentview, robot0_eye_in_hand, robot1_eye_in_hand]
 image_size: 84

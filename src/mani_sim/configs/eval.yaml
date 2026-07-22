@@ -21,3 +21,8 @@ stats_path: null
 openvla_instruction: null  # null이면 datasets/openvla_dataset.SQUARE_INSTRUCTION 사용
 save_gif: null  # 지정하면 첫 에피소드의 agentview 프레임을 GIF로 저장(cv2 라이브 뷰어
 # 대안 — 2026-07-19, 이 PC 터미널에서 cv2.namedWindow가 원인 불명으로 멈추는 문제 회피용)
+# stage-as-input 강건성 체크 전용(2026-07-22, use_online_stage_tracker=true task에서만 유효).
+# stage_shift_target=null이면 평소처럼 정상 online tracker. 정수(stage index)를 주면 그
+# stage에 진입한 뒤 처음 stage_shift_window 프레임 동안 stage+1(clamp)을 대신 주입.
+stage_shift_target: null
+stage_shift_window: 20

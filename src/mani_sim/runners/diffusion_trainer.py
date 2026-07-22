@@ -13,7 +13,12 @@ reference-context(OpenVLA만 있음)가 없어 이번 리팩터 범위에서 제
 
 **rabc**(2026-07-19 추가) — SARM 논문(arXiv:2509.25358)의 RA-BC를 progress-delta 가중치로
 이식(weighting/rabc.py). class_based/action_error와 인터페이스가 달라(action_mode(B,T) 대신
-demo_id+index_in_demo 필요) 아래서 별도 분기로 처리."""
+demo_id+index_in_demo 필요) 아래서 별도 분기로 처리.
+
+**phase_rule/action_variance**(2026-07-21 추가) — 개입 라운드 없이(순수 PH demo) 가중치
+산정방식 비교 ablation용. rabc와 같은 demo_id/index_in_demo 인터페이스. phase_rule=규칙기반
+(DAISS 스타일, offline stage 라벨), action_variance=`scripts/compute_action_variance.py`로
+미리 계산한 반복샘플링 분산(교수님 7/15 원문 정의 — cross-demo 아님)."""
 
 import logging
 import os
@@ -74,9 +79,31 @@ class DiffusionTrainer:
             )
             # demo_id/index_in_demo는 RobomimicSequenceDataset.__getitem__ 기본 반환값이라
             # extra_keys 불필요(action_mode도 안 씀 — SARM은 라벨 종류와 무관).
+        elif weighting_kind == "phase_rule":
+            from mani_sim.weighting.phase_rule import PhaseRuleWeight
+            self.weighting = PhaseRuleWeight(
+                cfg.task.hdf5_path, critical_weight=weighting_cfg.critical_weight,
+                critical_stages=tuple(weighting_cfg.critical_stages), device=device,
+            )
+        elif weighting_kind == "action_variance":
+            from mani_sim.weighting.action_variance import ActionVarianceWeight
+            self.weighting = ActionVarianceWeight(
+                weighting_cfg.variance_path, w_min=weighting_cfg.w_min, w_max=weighting_cfg.w_max,
+                device=device,
+            )
+        elif weighting_kind == "event_radius":
+            from mani_sim.weighting.event_radius import EventRadiusWeight
+            self.weighting = EventRadiusWeight(
+                cfg.task.hdf5_path, critical_weight=weighting_cfg.critical_weight,
+                critical_stages=tuple(weighting_cfg.critical_stages), radius=weighting_cfg.radius,
+                device=device,
+            )
         elif weighting_kind is not None:
-            raise ValueError(f"weighting.kind={weighting_kind!r} 미지원 (class_based|action_error|rabc) "
-                              "— APO(적응형, reference 모델 필요)는 BC/DiffusionPolicy에 아직 미구현")
+            raise ValueError(
+                f"weighting.kind={weighting_kind!r} 미지원 "
+                "(class_based|action_error|rabc|phase_rule|action_variance|event_radius) — "
+                "APO(적응형, reference 모델 필요)는 BC/DiffusionPolicy에 아직 미구현"
+            )
         self.weighting_kind = weighting_kind
 
         cache_mode = "all" if cfg.num_workers >= 1 else "low_dim"  # h5py fork 크래시 회피(지뢰, mani_sim_status.md)
@@ -149,12 +176,20 @@ class DiffusionTrainer:
                 }
                 if self.weighting is not None:
                     per_sample_loss = self.policy.compute_loss(batch, reduction="none")  # (B,)
-                    if self.weighting_kind == "rabc":
+                    if self.weighting_kind in ("rabc", "phase_rule", "action_variance", "event_radius"):
                         weight_b = self.weighting.compute_weights(raw_batch["demo_id"], raw_batch["index_in_demo"])
                     else:
                         action_mode = raw_batch["action_mode"].to(self.device)
                         weight_bt = self.weighting.compute_weights(action_mode, error=per_sample_loss.detach())
                         weight_b = weight_bt.mean(dim=1)
+                    if self.weighting_kind != "class_based":
+                        # STAIR(2606.15587) Eq.2 정규화(1/Σw)·Σw·ℓ와 동치 — sirius_loss 자체는
+                        # SIRIUS 원문 재현을 위해 안 건드리고(docstring 참고), 배치 평균이 1이
+                        # 되도록 weight만 미리 스케일링(수학적으로 동일 효과). class_based만 SIRIUS
+                        # 원문 그대로 두기 위해 제외(2026-07-22, 방식 간 실효 loss 스케일이 달라
+                        # 공정 비교가 안 된다는 지적으로 추가 — phase_rule 배치평균 1.522,
+                        # action_variance 0.922 등 방식마다 제각각이었음).
+                        weight_b = weight_b / weight_b.mean().clamp(min=1e-8)
                     loss = sirius_loss(per_sample_loss, weight_b)  # (B,) x (B,) -> scalar
                 else:
                     loss = self.policy.compute_loss(batch)

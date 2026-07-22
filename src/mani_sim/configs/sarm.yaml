@@ -1,6 +1,7 @@
-# SARM reward model 학습 설정(scripts/train_sarm.py). task/policy registry와 별개 —
-# reward model은 action을 안 만들어서 기존 policy 인터페이스(compute_loss(batch)->scalar,
-# predict_action_chunk)에 안 맞음, 독립 config로 둔다.
+# SARM(arXiv:2509.25358) reward model 학습 설정(scripts/train_sarm.py).
+# StageTransformer/SubtaskTransformer(policies/sarm/sarm_transformer.py) — xdofai/opensarm
+# 원문 아키텍처 그대로 포팅[검증-원문, 2026-07-22]. task/policy registry와 별개 —
+# reward model은 action을 안 만들어서 기존 policy 인터페이스에 안 맞음, 독립 config로 둔다.
 hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
 image_key: agentview_image
 state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, robot1_eef_pos, robot1_eef_quat, robot1_gripper_qpos]
@@ -11,17 +12,35 @@ state_dims:
   robot1_eef_pos: 3
   robot1_eef_quat: 4
   robot1_gripper_qpos: 2
-image_size: 84
-num_stages: 6
+num_stages: 5
+task_description: "remove the lid, hand off the payload between the two arms, and deliver it to the target bin"
+
+# 원문 default(d_model=768,n_layers=8,n_heads=12)는 저자들의 T-shirt-folding 대규모(다과제)
+# 데이터셋 기준 — 우리는 단일 task·200 demo라 과대적합/학습시간 문제로 축소[사용자 확인 없이
+# 진행, 2026-07-22 — 이건 아키텍처 단순화가 아니라 데이터 규모에 맞춘 용량 조정].
+model:
+  d_model: 384
+  n_layers: 6
+  n_heads: 6
+  dropout: 0.1
+  n_obs_steps: 8       # window 길이 = n_obs_steps+1 = 9 (원문 그대로)
+  frame_gap: 15         # 원문 30 → 우리 에피소드(400~700f)가 원문(T-shirt) 대비 짧아 축소
 
 seed: 0
 batch_size: 128
 num_workers: 0
-lr: 1.0e-4
-num_epochs: 20
+num_epochs: 3
 log_every: 100
-ckpt_every_epochs: 5
-output_dir: outputs/sarm/transport
+ckpt_every_epochs: 1
+output_dir: outputs/sarm/transport_v2
 device: cuda
 use_wandb: false
 wandb_project: mani_sim
+
+optim:
+  lr: 5.0e-5
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 5.0e-3
+  warmup_steps: 200      # 원문 1000 → 우리 total_steps가 훨씬 작아 비례 축소
+grad_clip: 1.0

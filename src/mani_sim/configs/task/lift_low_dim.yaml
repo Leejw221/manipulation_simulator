@@ -1,7 +1,7 @@
 name: lift_low_dim
 env_name: Lift
 robots: Panda
-hdf5_path: data/robomimic/lift/ph/v1.5/lift/ph/low_dim_v15.hdf5
+hdf5_path: data/robomimic/lift/ph/low_dim_v15.hdf5
 obs_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, object]
 obs_dims:
   robot0_eef_pos: 3

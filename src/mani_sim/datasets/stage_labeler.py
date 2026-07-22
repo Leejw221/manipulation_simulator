@@ -102,27 +102,53 @@ def onehot(stage, num=NUM_STAGES):
     return oh
 
 
-def stage_progress(stage, num=NUM_STAGES):
-    """stage(T,) int(0..num-1, 단조증가) → stage-aware progress(T,) float[0,1), 단조증가.
+def stage_alpha_bar(stage_by_demo, num):
+    """SARM(arXiv:2509.25358) Eq.1 — ᾱ_k = (1/M)Σᵢ(L_{i,k}/Tᵢ), 데이터셋 전체 M개 데모에서
+    stage k가 차지하는 시간비율의 평균[검증-원문, xdofai/opensarm 및 lerobot 포크
+    compute_temporal_proportions와 대조 확인, 2026-07-22]. stage_by_demo: {demo_id: stage(T,) int}.
+    반환: (num,) float, sum=1."""
+    ratio_sum = np.zeros(num, dtype=np.float64)
+    M = len(stage_by_demo)
+    for stage in stage_by_demo.values():
+        T = len(stage)
+        counts = np.bincount(np.asarray(stage), minlength=num)
+        ratio_sum += counts / T
+    alpha_bar = ratio_sum / M
+    return (alpha_bar / alpha_bar.sum()).astype(np.float32)  # 수치오차 방지용 재정규화
 
-    SARM(arXiv:2509.25358)의 "전체 에피소드 단일 선형 진행도 대신, stage+stage 내 상대위치로
-    진행도를 표현" 정의를 그대로 따른다: progress = (stage_idx + stage 내 상대위치) / num_stages.
-    RA-BC 가중치의 입력이며, 학습 라벨(오프라인, 전체 궤적 기준)이라 롤아웃 인과성 문제는 없다
-    — OnlineStageTracker(온라인, stage 입력용)와는 별도 용도.
-    """
+
+def stage_tau(stage, num=NUM_STAGES):
+    """stage(T,) int(0..num-1, 단조증가) → tau(T,) float[0,1) — stage 내 상대위치
+    (SARM Eq.2의 τ_t, alpha_bar와 무관한 순수 지역 위치). stage_progress()와 stage_alpha_bar()
+    양쪽에서 재사용(구간 경계 계산은 동일 로직)."""
     stage = np.asarray(stage, dtype=np.int64)
     T = len(stage)
     starts = np.searchsorted(stage, np.arange(num), side="left")  # stage 단조증가라 유효
     ends = np.append(starts[1:], T)
 
-    progress = np.zeros(T, dtype=np.float32)
+    tau = np.zeros(T, dtype=np.float32)
     for s in range(num):
         s0, s1 = int(starts[s]), int(ends[s])
         if s1 <= s0:
             continue
-        local = (np.arange(s0, s1) - s0) / max(s1 - s0, 1)  # 0..<1, stage 내 상대위치
-        progress[s0:s1] = (s + local) / num
-    return progress
+        tau[s0:s1] = (np.arange(s0, s1) - s0) / max(s1 - s0, 1)
+    return tau
+
+
+def stage_progress(stage, num=NUM_STAGES, alpha_bar=None):
+    """stage(T,) int(0..num-1, 단조증가) → stage-aware progress(T,) float[0,1), 단조증가.
+
+    SARM Eq.2 그대로: y_t = P_{k-1} + ᾱ_k·τ_t (P_k=Σᵢ≤k ᾱ_i, τ_t=stage 내 상대위치).
+    alpha_bar: (num,) — stage_alpha_bar()로 데이터셋 전체에서 미리 계산해 넘길 것. None이면
+    균등(1/num)으로 근사(구버전 호환용 fallback — 원문과 다름, RQ1 진단 등 급할 때만 사용,
+    실제 학습 타깃 생성에는 항상 alpha_bar를 계산해서 넘길 것[2026-07-22 정정]).
+    """
+    stage = np.asarray(stage, dtype=np.int64)
+    if alpha_bar is None:
+        alpha_bar = np.full(num, 1.0 / num, dtype=np.float32)
+    cum = np.concatenate([[0.0], np.cumsum(alpha_bar)]).astype(np.float32)  # P_0..P_num(=1)
+    tau = stage_tau(stage, num=num)
+    return cum[stage] + alpha_bar[stage] * tau
 
 
 STAGE_NAMES_DOOR = ["approach", "align", "pull_open", "push_close", "withdraw", "return"]
@@ -227,10 +253,15 @@ def label_stages_door_cabinet(obs, actions, action_mode):
 
 
 STAGE_NAMES_TRANSPORT = [
-    "lid_present", "lid_removed", "trash_delivered", "payload_approach", "payload_handoff",
-    "payload_delivered",
+    "lid_present", "lid_removed", "payload_approach", "payload_handoff", "payload_delivered",
 ]
 NUM_STAGES_TRANSPORT = len(STAGE_NAMES_TRANSPORT)
+# 2026-07-21 밤 trash_delivered 제거([검증-실측], 200demo 온라인/오프라인 경계 비교):
+# 순수 그리퍼 이벤트 경계(lid_removed·payload_handoff)는 online-offline lag 거의 0(평균
+# -0.2f/0f)인데, trash_delivered(ground-truth flag)는 최대 -140프레임까지 어긋남 — 신호
+# 자체 문제가 아니라 "두 팔이 겹칠 때(28.5% demo) offline이 trash_done을 lid_removed
+# 이후로 강제 clamp하지만 online은 즉시 반응"하는 게 원인(EXP-07의 stage mismatch와
+# 동일 유형). robot1의 trash 처리는 로봇0 관점의 payload_approach 구간에 자연히 흡수됨.
 
 # object obs(TwoArmTransport, 41) 레이아웃 — 2026-07-19 실측 확정([검증-실측], robosuite
 # TwoArmTransport의 raw named sensor 값과 object-state 벡터를 슬라이딩윈도우로 대조해 offset
@@ -278,15 +309,15 @@ def _close_open_events(sep, grasp_sep=TRANSPORT_GRASP_SEP, open_sep=TRANSPORT_OP
 
 
 def label_stages_transport(obs):
-    """obs(dict of numpy) → (T,) int stage(0..5). 필요 키: object, robot0_gripper_qpos,
+    """obs(dict of numpy) → (T,) int stage(0..4). 필요 키: object, robot0_gripper_qpos,
     robot1_gripper_qpos.
 
     stage 0 lid_present: robot0이 아직 lid를 안 치움.
-    stage 1 lid_removed: robot0이 lid handle을 한 번 쥐었다 놓음(제거 완료).
-    stage 2 trash_delivered: trash_in_trash_bin=1(robot0이 아직 payload를 안 잡음).
-    stage 3 payload_approach: robot0이 payload를 grasp해 robot1 쪽으로 옮기는 중(핸드오프 전).
-    stage 4 payload_handoff: robot1이 payload를 grasp(핸드오프 발생, 이후 target_bin으로 운반).
-    stage 5 payload_delivered: payload_in_target_bin=1(보통 에피소드 거의 끝).
+    stage 1 lid_removed: robot0이 lid handle을 한 번 쥐었다 놓음(제거 완료). robot1의 trash
+      처리(trash_in_trash_bin)는 별도 stage로 안 잡고 이 구간에 흡수(위 모듈독스트링 참고).
+    stage 2 payload_approach: robot0이 payload를 grasp해 robot1 쪽으로 옮기는 중(핸드오프 전).
+    stage 3 payload_handoff: robot1이 payload를 grasp(핸드오프 발생, 이후 target_bin으로 운반).
+    stage 4 payload_delivered: payload_in_target_bin=1(보통 에피소드 거의 끝).
     """
     obj = np.asarray(obs["object"], dtype=np.float64)
     g0 = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float64)
@@ -296,7 +327,6 @@ def label_stages_transport(obs):
 
     sep0 = g0[:, 0] - g0[:, 1]
     sep1 = g1[:, 0] - g1[:, 1]
-    trash_flag = obj[:, 28]
     payload_flag = obj[:, 27]
     d_payload1 = np.linalg.norm(obj[:, 35:38], axis=1)
 
@@ -304,7 +334,6 @@ def label_stages_transport(obs):
     t_first_open0 = _first(sep0 > TRANSPORT_OPEN_SEP, 0)
     t_lid_grasp = _first((idx > t_first_open0) & (sep0 < TRANSPORT_GRASP_SEP), T)
     t_lid_removed = _first((idx > t_lid_grasp) & (sep0 > TRANSPORT_OPEN_SEP), T)
-    t_trash_done = _first(trash_flag > 0.5, T)
 
     # robot0의 lid_removed 이후 첫 close = payload grasp(lid grasp는 이미 지나감).
     c0, _o0 = _close_open_events(sep0)
@@ -323,18 +352,17 @@ def label_stages_transport(obs):
 
     t_payload_done = _first(payload_flag > 0.5, T)
 
-    ts = [t_lid_removed, t_trash_done, t_payload_grasp0, t_handoff, t_payload_done]
+    ts = [t_lid_removed, t_payload_grasp0, t_handoff, t_payload_done]
     for i in range(1, len(ts)):
         ts[i] = max(ts[i], ts[i - 1])
-    t_lid_removed, t_trash_done, t_payload_grasp0, t_handoff, t_payload_done = ts
+    t_lid_removed, t_payload_grasp0, t_handoff, t_payload_done = ts
 
     stage = np.zeros(T, dtype=np.int64)
     stage[:t_lid_removed] = 0
-    stage[t_lid_removed:t_trash_done] = 1
-    stage[t_trash_done:t_payload_grasp0] = 2
-    stage[t_payload_grasp0:t_handoff] = 3
-    stage[t_handoff:t_payload_done] = 4
-    stage[t_payload_done:] = 5
+    stage[t_lid_removed:t_payload_grasp0] = 1
+    stage[t_payload_grasp0:t_handoff] = 2
+    stage[t_handoff:t_payload_done] = 3
+    stage[t_payload_done:] = 4
     return stage
 
 
@@ -356,7 +384,6 @@ class OnlineStageTrackerTransport:
         sep0 = float(g0[0] - g0[1])
         sep1 = float(g1[0] - g1[1])
         d_payload1 = float(np.linalg.norm(obj[35:38]))
-        trash_done = obj[28] > 0.5
         payload_done = obj[27] > 0.5
 
         if sep0 > TRANSPORT_OPEN_SEP:
@@ -369,14 +396,12 @@ class OnlineStageTrackerTransport:
         s = self.stage
         if s == 0 and self._grasped_lid and sep0 > TRANSPORT_OPEN_SEP:
             s = 1
-        if s <= 1 and trash_done:
+        if s <= 1 and self._grasped_payload0:
             s = 2
-        if s <= 2 and self._grasped_payload0:
+        if s <= 2 and sep1 < TRANSPORT_GRASP_SEP and d_payload1 < TRANSPORT_NEAR_PAYLOAD:
             s = 3
-        if s <= 3 and sep1 < TRANSPORT_GRASP_SEP and d_payload1 < TRANSPORT_NEAR_PAYLOAD:
+        if s <= 3 and payload_done:
             s = 4
-        if s <= 4 and payload_done:
-            s = 5
 
         self.stage = max(self.stage, s)
         return self.stage
@@ -434,6 +459,33 @@ class OnlineStageTracker:
 
         self.stage = max(self.stage, s)
         return self.stage
+
+
+class ShiftedStageTracker:
+    """base tracker를 감싸서, target_stage 진입 후 처음 window 프레임만 stage+1(clamp)을
+    주입한다 — 그 뒤(또는 target_stage가 아닐 때)는 base tracker 그대로. stage-as-input
+    정책이 critical stage 진입 직후 짧게 틀린 신호를 받았을 때 얼마나 민감한지 보는 강건성
+    체크용(2026-07-22, 학습 불필요 — 순수 추론 후처리). 전체 궤적을 다 틀리게 하면 붕괴 원인이
+    "stage 의존"인지 "그냥 다 망가짐"인지 구분이 안 돼서, 구간을 짧게 국소화했다."""
+
+    def __init__(self, base_tracker, target_stage, window, num_stages):
+        self.base = base_tracker
+        self.target_stage = target_stage
+        self.window = window
+        self.num_stages = num_stages
+        self._steps_in_target = 0
+
+    def reset(self):
+        self.base.reset()
+        self._steps_in_target = 0
+
+    def step(self, obs):
+        s = self.base.step(obs)
+        if s == self.target_stage:
+            self._steps_in_target += 1
+            if self._steps_in_target <= self.window:
+                return min(s + 1, self.num_stages - 1)
+        return s
 
 
 def make_online_tracker(task_name):

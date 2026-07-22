@@ -1,13 +1,40 @@
 name: transport_stage
 env_name: TwoArmTransport
 robots: [Panda, Panda]
+# env_configuration: transport.yaml 참고(2026-07-21, robosuite 기본값과 달라 필수).
+env_kwargs:
+  env_configuration: single-arm-opposed
+  lite_physics: false
+  controller_configs:
+    type: BASIC
+    body_parts:
+      right:
+        type: OSC_POSE
+        input_max: 1
+        input_min: -1
+        output_max: [0.05, 0.05, 0.05, 0.5, 0.5, 0.5]
+        output_min: [-0.05, -0.05, -0.05, -0.5, -0.5, -0.5]
+        kp: 150
+        damping: 1
+        impedance_mode: fixed
+        kp_limits: [0, 300]
+        damping_limits: [0, 10]
+        position_limits: null
+        orientation_limits: null
+        uncouple_pos_ori: true
+        control_delta: true
+        interpolation: null
+        ramp_ratio: 0.2
+        input_ref_frame: world
+        gripper:
+          type: GRIP
 hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
 camera_names: [agentview, robot0_eye_in_hand, robot1_eye_in_hand]
 image_size: 84
 rgb_keys: [agentview_image, robot0_eye_in_hand_image, robot1_eye_in_hand_image]
 # stage_onehot: label_stages.py(--task transport)가 hdf5에 미리 기록해둔 6-dim one-hot
 # (datasets/stage_labeler.py의 label_stages_transport: lid_present/lid_removed/
-# trash_delivered/payload_approach/payload_handoff/payload_delivered — 로봇0이 payload를 잡아
+# payload_approach/payload_handoff/payload_delivered — 로봇0이 payload를 잡아
 # 로봇1 쪽으로 옮기는 구간(payload_approach)과 로봇1이 넘겨받는 순간(payload_handoff)을 분리).
 # transport.yaml과 이 필드 하나만 다르다. (라벨링 자체는 hdf5에 남아있는
 # object/robot{0,1}_gripper_qpos로 계산 — 정책 입력엔 object를 안 주므로(픽셀만) stage_onehot이
@@ -20,6 +47,6 @@ obs_dims:
   robot1_eef_pos: 3
   robot1_eef_quat: 4
   robot1_gripper_qpos: 2
-  stage_onehot: 6
+  stage_onehot: 5
 action_dim: 14
 use_online_stage_tracker: true

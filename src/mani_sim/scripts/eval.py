@@ -52,40 +52,55 @@ def _run_dp_eval(cfg, device):
 
     extra_obs_fn = extra_reset_fn = None
     if cfg.task.get("use_online_stage_tracker", False):
-        from mani_sim.datasets.stage_labeler import make_online_tracker, num_stages_for_task, onehot as stage_onehot
+        from mani_sim.datasets.stage_labeler import (
+            ShiftedStageTracker, make_online_tracker, num_stages_for_task, onehot as stage_onehot,
+        )
         tracker = make_online_tracker(cfg.task.name)
         n_stages = num_stages_for_task(cfg.task.name)
+        if cfg.get("stage_shift_target", None) is not None:
+            tracker = ShiftedStageTracker(
+                tracker, target_stage=cfg.stage_shift_target, window=cfg.stage_shift_window,
+                num_stages=n_stages,
+            )
+            logger.info(
+                f"stage shift 강건성 체크: target_stage={cfg.stage_shift_target} "
+                f"window={cfg.stage_shift_window}"
+            )
 
         def extra_obs_fn(obs_raw):
             return stage_onehot(np.array([tracker.step(obs_raw)]), num=n_stages)[0]
 
         extra_reset_fn = tracker.reset
 
+    if cfg.render and is_image_task(cfg.task):
+        # cv2.namedWindow가 이 PC에서 MuJoCo 오프스크린 GL 컨텍스트와 충돌해 멈춤(2026-07-20
+        # 실측 — 렌더 자체는 14ms/frame으로 빠름, cv2 창 생성 시점부터 CPU 100%로 무한 대기,
+        # SIGINT도 안 먹힘 — native 루프 추정, 원인 미해결). image task는 save_gif로 대체.
+        raise RuntimeError(
+            "render=true(cv2 라이브 창)는 이 PC에서 행 걸림(2026-07-20 확인) — 대신 "
+            "save_gif=<path>를 쓰세요(오프스크린 렌더만 사용, cv2 창 없음)."
+        )
+
     on_episode_step = None
-    if cfg.render:
-        if is_image_task(cfg.task):
-            import cv2
-            env = make_eval_env(cfg.task)
-            window_name = f"eval {os.path.basename(cfg.checkpoint_path)}"
-            cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    gif_frames = None
+    if cfg.save_gif and is_image_task(cfg.task):
+        env = make_eval_env(cfg.task)
+        gif_frames = []
 
-            def on_episode_step(env_, ep, step):
-                frame = env_.render(mode="rgb_array", height=640, width=640, camera_name="agentview")
-                bgr = frame[:, :, ::-1].copy()
-                cv2.putText(bgr, f"ep {ep + 1}/{cfg.num_episodes} step {step}", (10, 28),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                cv2.imshow(window_name, bgr)
-                cv2.waitKey(1)
-        else:
-            # low_dim: MuJoCo 네이티브 mjviewer(온스크린). image 분기(cv2 오프스크린)와 동시
-            # 사용 시 GL 컨텍스트 충돌로 세그폴트하므로(live_rollout.py에서 실측) 절대 안 섞음.
-            from mani_sim.envs.robomimic.factory import make_lowdim_env
-            env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.obs_keys),
-                                   render=True, gripper_types=cfg.task.get("gripper_types", None))
+        def on_episode_step(env_, ep, step):
+            if ep == 0 and step % 4 == 0:
+                frame = env_.render(mode="rgb_array", height=256, width=256, camera_name="agentview")
+                from PIL import Image
+                gif_frames.append(Image.fromarray(frame))
+    elif cfg.render:
+        # low_dim: MuJoCo 네이티브 mjviewer(온스크린).
+        from mani_sim.envs.robomimic.factory import make_lowdim_env
+        env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.obs_keys),
+                               render=True, gripper_types=cfg.task.get("gripper_types", None))
 
-            def on_episode_step(env_, ep, step):
-                env_.render()
-                time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
+        def on_episode_step(env_, ep, step):
+            env_.render()
+            time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
     else:
         env = make_eval_env(cfg.task)
 
@@ -99,9 +114,10 @@ def _run_dp_eval(cfg, device):
         device=device, rgb_keys=cfg.task.rgb_keys if is_image_task(cfg.task) else (),
         extra_obs_fn=extra_obs_fn, extra_obs_reset_fn=extra_reset_fn, on_episode_step=on_episode_step,
     )
-    if cfg.render and is_image_task(cfg.task):
-        import cv2
-        cv2.destroyAllWindows()
+    if gif_frames:
+        gif_frames[0].save(cfg.save_gif, save_all=True, append_images=gif_frames[1:],
+                            duration=60, loop=0, optimize=True)
+        logger.info(f"GIF 저장: {cfg.save_gif} ({len(gif_frames)} 프레임)")
     env.env.close()
     return metrics
 
