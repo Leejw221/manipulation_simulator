@@ -123,10 +123,23 @@ class DiffusionTrainer:
         )
         logger.info(f"dataset len={len(self.dataset)} cache={cache_mode} image={self.is_image}")
 
-        self.optimizer = torch.optim.AdamW(self.policy.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=max(cfg.num_epochs * len(self.dataloader), 1)
+        self.optimizer = torch.optim.AdamW(
+            self.policy.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
+            betas=(0.95, 0.999), eps=1e-8,
         )
+        total_steps = max(cfg.num_epochs * len(self.dataloader), 1)
+        warmup_steps = 500
+        if total_steps > warmup_steps:
+            # DP 논문 학습 디테일 + 공식코드(lr_warmup_steps=500)/lerobot(scheduler_warmup_steps=500) 일치.
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
+            )
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=total_steps - warmup_steps)
+            self.lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
+                self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+            )
+        else:
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=total_steps)
         self._eval_env = None  # lazy(첫 eval 때 생성 — dataloader worker fork 이후가 안전, EXP-01 지뢰)
         self._stage_tracker = None
         if cfg.task.get("use_online_stage_tracker", False):

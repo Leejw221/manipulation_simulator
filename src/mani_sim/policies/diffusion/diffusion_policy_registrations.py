@@ -38,6 +38,7 @@ def _build_diffusion(task_cfg, policy_cfg):
         pred_horizon=policy_cfg.pred_horizon,
         num_kp=policy_cfg.get("num_kp", 32),
         image_hw=policy_cfg.get("image_hw", [task_cfg.image_size, task_cfg.image_size]),
+        crop_hw=policy_cfg.get("crop_hw", None),
         down_dims=policy_cfg.down_dims,
         kernel_size=policy_cfg.kernel_size,
         n_groups=policy_cfg.n_groups,

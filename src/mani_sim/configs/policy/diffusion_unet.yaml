@@ -3,10 +3,11 @@ obs_horizon: 2
 pred_horizon: 16
 action_horizon: 8
 num_kp: 32
-down_dims: [256, 512]
+down_dims: [512, 1024, 2048]
 kernel_size: 5
 n_groups: 8
-diffusion_step_embed_dim: 256
+diffusion_step_embed_dim: 128
 num_train_timesteps: 100
 beta_schedule: squaredcos_cap_v2
-num_inference_steps: 10
+num_inference_steps: 100
+crop_hw: [76, 76]

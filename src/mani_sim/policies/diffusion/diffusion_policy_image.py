@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 from mani_sim.networks.conditional_unet1d import ConditionalUnet1d
@@ -48,19 +47,30 @@ class SpatialSoftmax(nn.Module):
 
 
 class VisionEncoder(nn.Module):
-    """ResNet-18 backbone(spatial 유지) + SpatialSoftmax → 키포인트 feature. 입력 (B,3,H,W) float[0,1]."""
+    """ResNet-18 backbone(spatial 유지) + SpatialSoftmax → 키포인트 feature. 입력 (B,3,H,W) float[0,1].
 
-    def __init__(self, num_kp=32, input_hw=(84, 84)):
+    crop_hw가 주어지면 학습 중엔 RandomCrop, eval 중엔 CenterCrop(DP 논문 Table7 CropRes, lerobot의
+    train/eval crop 분기 방식을 따름 — self.training으로 분기, policy.eval()은 rollout.py/eval.py에서
+    이미 호출됨)."""
+
+    def __init__(self, num_kp=32, input_hw=(84, 84), crop_hw=None):
         super().__init__()
+        self.crop_hw = tuple(crop_hw) if crop_hw is not None else None
+        if self.crop_hw is not None:
+            self.random_crop = torchvision.transforms.RandomCrop(self.crop_hw)
+            self.center_crop = torchvision.transforms.CenterCrop(self.crop_hw)
+        probe_hw = self.crop_hw if self.crop_hw is not None else input_hw
         resnet = torchvision.models.resnet18(weights=None)
         _replace_bn_with_gn(resnet)
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])  # avgpool·fc 제거 → (B,512,h,w)
         with torch.no_grad():
-            c, h, w = self.backbone(torch.zeros(1, 3, *input_hw)).shape[1:]
+            c, h, w = self.backbone(torch.zeros(1, 3, *probe_hw)).shape[1:]
         self.pool = SpatialSoftmax((c, h, w), num_kp=num_kp)
         self.out_dim = num_kp * 2
 
     def forward(self, x):
+        if self.crop_hw is not None:
+            x = self.random_crop(x) if self.training else self.center_crop(x)
         return self.pool(self.backbone(x)).flatten(1)  # (B, num_kp*2)
 
 
@@ -75,6 +85,7 @@ class DiffusionPolicyImage(nn.Module):
         pred_horizon,
         num_kp=32,
         image_hw=(84, 84),
+        crop_hw=None,
         down_dims=(256, 512),
         kernel_size=5,
         n_groups=8,
@@ -92,7 +103,7 @@ class DiffusionPolicyImage(nn.Module):
         self.num_inference_steps = num_inference_steps
 
         self.encoders = nn.ModuleDict(
-            {k: VisionEncoder(num_kp=num_kp, input_hw=tuple(image_hw)) for k in self.rgb_keys}
+            {k: VisionEncoder(num_kp=num_kp, input_hw=tuple(image_hw), crop_hw=crop_hw) for k in self.rgb_keys}
         )
         feat = next(iter(self.encoders.values())).out_dim if self.rgb_keys else 0
 
@@ -107,7 +118,9 @@ class DiffusionPolicyImage(nn.Module):
             num_train_timesteps=num_train_timesteps, beta_schedule=beta_schedule,
             clip_sample=True, prediction_type="epsilon",
         )
-        self.inference_scheduler = DDIMScheduler(
+        # DP 논문: sim에서는 train/inference 모두 DDPM 100 step(가속 없음) — DDIM은
+        # real-world 전용(16 step). 공식코드·lerobot 모두 inference도 DDPM 그대로 씀.
+        self.inference_scheduler = DDPMScheduler(
             num_train_timesteps=num_train_timesteps, beta_schedule=beta_schedule,
             clip_sample=True, prediction_type="epsilon",
         )
