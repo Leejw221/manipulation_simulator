@@ -15,6 +15,28 @@ import os
 import re
 
 import torch
+from omegaconf import OmegaConf
+
+RUN_CONFIG_FILENAME = "run_config.yaml"
+
+
+def save_run_config(output_dir, task_cfg, policy_cfg, policy_name):
+    """학습이 실제로 쓴 task/policy 설정을 체크포인트 폴더에 사본으로 남긴다 — eval.py가
+    이걸 읽어 task=/policy=를 사람이 다시 맞춰줄 필요 없이 자동으로 맞춘다(2026-07-25).
+    hydra 내부(.hydra/config.yaml)에 기대지 않는 이유: 우리가 형식을 소유해야 hydra
+    버전이 바뀌어도 안 깨진다."""
+    os.makedirs(output_dir, exist_ok=True)
+    payload = OmegaConf.create({"task": task_cfg, "policy": policy_cfg, "policy_name": policy_name})
+    OmegaConf.save(payload, os.path.join(output_dir, RUN_CONFIG_FILENAME))
+
+
+def load_run_config(checkpoint_path):
+    """checkpoint_path 옆의 run_config.yaml을 읽는다. 없으면 None(구 체크포인트·openvla 등 —
+    호출부에서 기존 CLI 값을 그대로 쓰도록 처리)."""
+    path = os.path.join(os.path.dirname(checkpoint_path), RUN_CONFIG_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    return OmegaConf.load(path)
 
 
 def get_latest_epoch_checkpoint(output_dir, prefix="policy_epoch"):
@@ -39,6 +61,32 @@ def save_epoch_checkpoint(output_dir, epoch, model, extra=None):
         payload.update(extra)
     torch.save(payload, path)
     return path
+
+
+RESUME_STATE_FILENAME = "resume_state.pt"
+
+
+def save_resume_state(output_dir, epoch, model, optimizer, lr_scheduler):
+    """재개(resume) 전용 상태 — 고정 파일명으로 매번 덮어쓴다(2026-07-25). AdamW
+    optimizer state가 모델 파라미터의 2배 크기라(exp_avg, exp_avg_sq), epoch별
+    마일스톤 체크포인트(`policy_epoch<N>.pt`, eval/비교용)에 매번 같이 넣으면 저장이
+    N배로 불어난다(실측: 1.1GB→3.3GB/개). resume엔 항상 가장 최근 것 하나만
+    필요하므로 별도 파일 하나에만 둔다."""
+    os.makedirs(output_dir, exist_ok=True)
+    payload = {
+        "model": model.state_dict(), "epoch": epoch,
+        "optimizer": optimizer.state_dict(), "lr_scheduler": lr_scheduler.state_dict(),
+    }
+    torch.save(payload, os.path.join(output_dir, RESUME_STATE_FILENAME))
+
+
+def load_resume_state(output_dir, device):
+    """resume_state.pt가 있으면 그 dict, 없으면 None(구 학습 — 옛 policy_epoch<N>.pt로
+    fallback해야 함, 호출부 책임)."""
+    path = os.path.join(output_dir, RESUME_STATE_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    return torch.load(path, map_location=device, weights_only=False)
 
 
 def load_epoch_checkpoint(path, model, device):

@@ -13,6 +13,7 @@ image=cv2 오프스크린 렌더 — 동시 사용 시 GL 컨텍스트 충돌로
         stats_path=outputs/train/square_openvla/normalization_stats.json save_gif=outputs/openvla_rollout.gif
 """
 
+import json
 import logging
 import os
 import time
@@ -20,14 +21,29 @@ import time
 import hydra
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from mani_sim.datasets.normalization import MinMaxNormalizer, load_stats
 from mani_sim.factory import registry
 from mani_sim.runners.rollout import rollout_policy
+from mani_sim.utils.checkpoints import load_run_config
 from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_obs_keys
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_run_config(cfg):
+    """checkpoint_path 옆 run_config.yaml(학습 시 자동 저장)이 있으면 task/policy/policy_name을
+    거기서 덮어써 학습·추론 설정이 어긋나는 걸 막는다(2026-07-25). 없으면(구 체크포인트,
+    openvla는 아직 저장 안 함) 아무것도 안 하고 기존 CLI 값 그대로 진행."""
+    if not cfg.get("use_run_config", True) or not cfg.checkpoint_path:
+        return cfg
+    saved = load_run_config(cfg.checkpoint_path)
+    if saved is None:
+        return cfg
+    cfg = OmegaConf.merge(cfg, {"task": saved.task, "policy": saved.policy, "policy_name": saved.policy_name})
+    logger.info(f"run_config.yaml에서 자동 적용: task={saved.task.name} policy_name={saved.policy_name}")
+    return cfg
 
 
 def _to_pil(img_chw01):
@@ -190,6 +206,7 @@ def _run_openvla_eval(cfg):
 
 @hydra.main(config_path="../configs", config_name="eval", version_base=None)
 def main(cfg: DictConfig):
+    cfg = _apply_run_config(cfg)
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     if cfg.policy_name == "openvla":
@@ -199,6 +216,10 @@ def main(cfg: DictConfig):
 
     logger.info(f"checkpoint={cfg.checkpoint_path} {metrics}")
     print(metrics)
+
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    with open(os.path.join(cfg.output_dir, "metrics.json"), "w") as f:
+        json.dump({"checkpoint_path": cfg.checkpoint_path, **metrics}, f, indent=2)
     return metrics
 
 

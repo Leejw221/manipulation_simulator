@@ -31,7 +31,9 @@ from mani_sim.datasets.robomimic_dataset import RobomimicSequenceDataset
 from mani_sim.factory import registry
 from mani_sim.losses.sirius_loss import sirius_loss
 from mani_sim.runners.rollout import rollout_policy
-from mani_sim.utils.checkpoints import get_latest_epoch_checkpoint, save_epoch_checkpoint
+from mani_sim.utils.checkpoints import (
+    get_latest_epoch_checkpoint, load_resume_state, save_epoch_checkpoint, save_resume_state, save_run_config,
+)
 from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_lowdim_keys, task_obs_keys
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,7 @@ class DiffusionTrainer:
             )
         else:
             self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=total_steps)
+        save_run_config(cfg.output_dir, cfg.task, cfg.policy, cfg.policy_name)  # eval.py 자동 설정용
         self._eval_env = None  # lazy(첫 eval 때 생성 — dataloader worker fork 이후가 안전, EXP-01 지뢰)
         self._stage_tracker = None
         if cfg.task.get("use_online_stage_tracker", False):
@@ -153,12 +156,24 @@ class DiffusionTrainer:
         return stage_onehot(np.array([s]), num=num_stages_for_task(self.task_cfg.name))[0]
 
     def resume_start_epoch(self):
+        resume_state = load_resume_state(self.cfg.output_dir, self.device)
+        if resume_state is not None:
+            self.policy.load_state_dict(resume_state["model"])
+            self.optimizer.load_state_dict(resume_state["optimizer"])
+            self.lr_scheduler.load_state_dict(resume_state["lr_scheduler"])
+            epoch = resume_state["epoch"]
+            logger.info(f"resumed from resume_state.pt (epoch {epoch}, optimizer/lr_scheduler 복원됨)")
+            return epoch
+
         path, epoch = get_latest_epoch_checkpoint(self.cfg.output_dir)
         if path is None:
             return 0
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.policy.load_state_dict(ckpt["model"])
-        logger.info(f"resumed from {path} (epoch {epoch})")
+        logger.warning(
+            f"resumed from {path} (epoch {epoch}) — 구 학습이라 resume_state.pt 없음, "
+            "optimizer/lr_scheduler는 처음부터 다시 시작됨(warmup 포함)"
+        )
         return epoch
 
     def evaluate(self, num_episodes, max_steps):
@@ -223,7 +238,8 @@ class DiffusionTrainer:
             is_last = epoch == num_epochs - 1
             if (epoch + 1) % self.cfg.ckpt_every_epochs == 0 or is_last:
                 path = save_epoch_checkpoint(self.cfg.output_dir, epoch + 1, self.policy)
-                logger.info(f"saved checkpoint: {path}")
+                save_resume_state(self.cfg.output_dir, epoch + 1, self.policy, self.optimizer, self.lr_scheduler)
+                logger.info(f"saved checkpoint: {path} (+ resume_state.pt)")
 
             if self.cfg.eval_every_epochs > 0 and ((epoch + 1) % self.cfg.eval_every_epochs == 0 or is_last):
                 metrics = self.evaluate(self.cfg.eval_episodes, self.cfg.eval_max_steps)

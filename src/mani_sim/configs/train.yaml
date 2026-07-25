@@ -58,10 +58,19 @@ weighting:
   w_max: 5.0               # action_variance 전용, 가중치 clip 상한
 
 resume: false
-# manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)에서 <task>/<model> 중첩까지만
-# 맞춘다 - <session> 타임스탬프까지 넣으면 매 실행마다 새 폴더가 생겨 resume=true(output_dir
-# 안 최신 체크포인트 자동탐색)가 깨진다.
-output_dir: outputs/${task.name}/${policy.name}
+# manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)을 그대로 따름 — <session>은
+# 학습 시작 시각(2026-07-25 리팩터). resume=true로 이어가려면 이 output_dir을 그대로
+# 다시 지정해야 한다(새로 실행하면 새 시각 폴더가 생겨 다른 세션이 됨 — 오늘 기본값을
+# 새로 만들 때만 편하고 이어갈 땐 원래도 output_dir을 그대로 다시 줘야 했던 것과 동일한
+# 부담, resume 자체가 새로 깨지는 건 아님).
+output_dir: outputs/${task.name}/${policy.name}/${now:%Y%m%d-%H%M%S}
 device: cuda
 use_wandb: false
 wandb_project: mani_sim
+
+# hydra 자체 로그/설정 스냅샷(.hydra/)도 같은 폴더에 쌓아 체크포인트와 분리되지 않게 한다
+# (전엔 outputs/<날짜>/<시각>/에 따로 생겼음 — hydra는 cwd는 안 바꾸므로(확인함, 2026-07-25)
+# data/ 상대경로 등엔 영향 없음).
+hydra:
+  run:
+    dir: ${output_dir}
