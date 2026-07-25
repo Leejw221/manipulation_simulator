@@ -20,7 +20,7 @@
 import hydra
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from mani_sim.datasets.intervention_writer import write_intervention_hdf5
 from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
@@ -120,7 +120,12 @@ def main(cfg: DictConfig):
         action_horizon = 1  # robomimic 정책은 매 스텝 재계획(청크 없음)
     else:
         gripper_types = cfg.task.get("gripper_types", None)
-        env_kwargs = {}
+        # 2026-07-25 수정: 예전엔 여기서 env_kwargs를 빈 dict로 새로 만들어서 cfg.task.env_kwargs
+        # (env_configuration 등, hdf5에서 derive됨)를 아예 무시했음 — eval.py/make_eval_env는
+        # 이 필드를 읽는데 collect.py만 따로 놀았던 버그. Transport처럼 env_kwargs가 실제로
+        # 의미 있는 task로 개입 라운드를 수집하면 로봇이 학습 데이터와 다른 위치에 스폰됨
+        # (7/21 학습 쪽 사고와 같은 종류, 지금까지 door_cabinet(단일팔)만 써서 안 드러났을 뿐).
+        env_kwargs = OmegaConf.to_container(cfg.task.env_kwargs, resolve=True) if cfg.task.get("env_kwargs") else {}
         if "outside_color" in cfg.task:
             env_kwargs["outside_color"] = cfg.task.outside_color
         if is_image_task(cfg.task):
