@@ -117,10 +117,8 @@ def _run_dp_eval(cfg, device):
                 from PIL import Image
                 gif_frames.append(Image.fromarray(frame))
     elif cfg.render:
-        # low_dim: MuJoCo 네이티브 mjviewer(온스크린).
-        from mani_sim.envs.robomimic.factory import make_lowdim_env
-        env = make_lowdim_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.obs_keys),
-                               render=True, gripper_types=cfg.task.get("gripper_types", None))
+        # low_dim: MuJoCo 네이티브 mjviewer(온스크린). (image+render는 위에서 이미 막힘)
+        env = make_eval_env(cfg.task, render=True)
 
         def on_episode_step(env_, ep, step):
             env_.render()
@@ -150,7 +148,6 @@ def _run_openvla_eval(cfg):
     """OpenVLA는 predict_action_chunk가 아니라 매 스텝 단일 이미지로 재계획(원 논문 방식) —
     rollout_policy()의 청크 인터페이스와 안 맞아 별도 루프."""
     from mani_sim.datasets.openvla_dataset import SQUARE_INSTRUCTION
-    from mani_sim.envs.robomimic.factory import make_image_env
 
     if cfg.stats_path is None:
         raise ValueError(
@@ -166,8 +163,10 @@ def _run_openvla_eval(cfg):
     logger.info(f"loaded adapter: {cfg.checkpoint_path}")
 
     # OpenVLA는 224 사전학습 해상도를 기대(task.image_size가 84여도 여기선 224로 별도 렌더).
-    env = make_image_env(cfg.task.env_name, cfg.task.robots, list(cfg.task.lowdim_keys),
-                          list(cfg.task.rgb_keys), list(cfg.task.camera_names), image_size=224)
+    # (2026-07-25: env_kwargs를 여기서 아예 안 넘기던 버그도 make_eval_env 경유로 같이 해결됨
+    # — Transport 등 env_kwargs가 실제로 의미 있는 task에서 OpenVLA를 평가하면 로봇이
+    # 잘못된 위치에 스폰됐을 것, collect.py와 같은 종류.)
+    env = make_eval_env(cfg.task, image_size_override=224)
 
     if cfg.eval_seed is not None:
         np.random.seed(cfg.eval_seed)

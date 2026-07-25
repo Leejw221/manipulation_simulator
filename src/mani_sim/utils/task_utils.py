@@ -56,17 +56,29 @@ def derive_task_meta_from_hdf5(task_cfg):
     return task_cfg
 
 
-def make_eval_env(task_cfg):
+def make_eval_env(task_cfg, render=False, renderer="mjviewer", image_size_override=None, env_kwargs_override=None):
+    """train/eval/collect 3곳에서 각자 env를 만들던 걸 통합(2026-07-25) — task_cfg 필드를
+    풀어쓰는 로직이 세 군데 복사돼 있었고, 그중 하나(collect.py)는 env_kwargs를 통째로
+    빠뜨리는 버그로 이어졌었다(직전 커밋). 실제로 다른 건 render 시점·image_size·env_kwargs
+    출처(collect.py는 outside_color를 더 얹음) 셋뿐이라 인자로 흡수한다.
+
+    image task + render=True는 여기서 처리하지 않는다(호출부 책임) — cv2 오프스크린 렌더와
+    mjviewer 온스크린이 GL 컨텍스트 충돌로 세그폴트하는 게 문서화된 지뢰라, image 쪽은
+    make_image_env 생성 *후에* `env.env.has_renderer` 등을 직접 패치하는 방식을 그대로 둔다
+    (collect.py 참고, eval.py는 image+render 자체를 막음)."""
     gripper_types = task_cfg.get("gripper_types", None)
-    env_kwargs = OmegaConf.to_container(task_cfg.env_kwargs, resolve=True) if task_cfg.get("env_kwargs", None) else None
+    if env_kwargs_override is not None:
+        env_kwargs = env_kwargs_override
+    else:
+        env_kwargs = OmegaConf.to_container(task_cfg.env_kwargs, resolve=True) if task_cfg.get("env_kwargs", None) else None
     if is_image_task(task_cfg):
         from mani_sim.envs.robomimic.factory import make_image_env
         return make_image_env(
             task_cfg.env_name, task_cfg.robots,
             list(task_cfg.lowdim_keys), list(task_cfg.rgb_keys),
-            list(task_cfg.camera_names), image_size=task_cfg.image_size,
+            list(task_cfg.camera_names), image_size=image_size_override or task_cfg.image_size,
             gripper_types=gripper_types, env_kwargs=env_kwargs,
         )
     from mani_sim.envs.robomimic.factory import make_lowdim_env
     return make_lowdim_env(task_cfg.env_name, task_cfg.robots, list(task_cfg.obs_keys),
-                            gripper_types=gripper_types, env_kwargs=env_kwargs)
+                            render=render, renderer=renderer, gripper_types=gripper_types, env_kwargs=env_kwargs)

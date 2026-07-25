@@ -25,10 +25,9 @@ from omegaconf import DictConfig, OmegaConf
 from mani_sim.datasets.intervention_writer import write_intervention_hdf5
 from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
 from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats
-from mani_sim.envs.robomimic.factory import make_image_env, make_lowdim_env
 from mani_sim.factory import registry
 from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
-from mani_sim.utils.task_utils import is_image_task, task_lowdim_keys, task_obs_keys
+from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_lowdim_keys, task_obs_keys
 
 
 def _build_policy_predict_fn(cfg, device, action_horizon):
@@ -119,7 +118,6 @@ def main(cfg: DictConfig):
         policy, env, predict_fn, obs_keys = _build_robomimic_policy_env(cfg, device)
         action_horizon = 1  # robomimic 정책은 매 스텝 재계획(청크 없음)
     else:
-        gripper_types = cfg.task.get("gripper_types", None)
         # 2026-07-25 수정: 예전엔 여기서 env_kwargs를 빈 dict로 새로 만들어서 cfg.task.env_kwargs
         # (env_configuration 등, hdf5에서 derive됨)를 아예 무시했음 — eval.py/make_eval_env는
         # 이 필드를 읽는데 collect.py만 따로 놀았던 버그. Transport처럼 env_kwargs가 실제로
@@ -132,22 +130,15 @@ def main(cfg: DictConfig):
             # render=True(사람이 보는 mjviewer 창)와 오프스크린 image obs 렌더는 서로 다른 GL
             # 컨텍스트 요구라 함께 못 씀(mani_sim의 기존 landmine) — PICO 수집 중엔 사람이
             # 화면을 봐야 하므로 render=cfg.render 그대로 두고, image obs는 make_image_env가
-            # 알아서 오프스크린으로 렌더한다(EnvRobosuite가 내부적으로 둘 다 처리).
-            env = make_image_env(
-                cfg.task.env_name, cfg.task.robots,
-                list(cfg.task.lowdim_keys), list(cfg.task.rgb_keys),
-                list(cfg.task.camera_names), image_size=cfg.task.image_size,
-                gripper_types=gripper_types, env_kwargs=env_kwargs,
-            )
+            # 알아서 오프스크린으로 렌더한다(EnvRobosuite가 내부적으로 둘 다 처리). make_eval_env는
+            # image+render를 여기서 처리 안 하므로(문서화된 지뢰) 생성 후 그대로 직접 패치한다.
+            env = make_eval_env(cfg.task, env_kwargs_override=env_kwargs)
             if cfg.render:
                 env.env.has_renderer = True
                 env.env.renderer = "mjviewer"
             obs_keys = task_obs_keys(cfg.task)
         else:
-            env = make_lowdim_env(
-                cfg.task.env_name, cfg.task.robots, cfg.task.obs_keys, render=cfg.render,
-                gripper_types=gripper_types, env_kwargs=env_kwargs,
-            )
+            env = make_eval_env(cfg.task, render=cfg.render, env_kwargs_override=env_kwargs)
             obs_keys = list(cfg.task.obs_keys)
         policy, predict_fn = _build_policy_predict_fn(cfg, device, cfg.policy.action_horizon)
         action_horizon = cfg.policy.action_horizon
