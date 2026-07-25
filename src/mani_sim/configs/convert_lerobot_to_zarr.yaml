@@ -1,0 +1,5 @@
+# convert_lerobot_to_zarr.py 전용 config (piper_collect env에서 실행).
+repo_id: mani_sim/piper_sort_return
+lerobot_root: data/piper_sort_return/lerobot_raw
+zarr_path: data/piper_sort_return/piper_sort_return.zarr
+camera_names: [front, wrist]

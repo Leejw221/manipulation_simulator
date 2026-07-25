@@ -27,7 +27,7 @@ from mani_sim.datasets.normalization import MinMaxNormalizer, load_stats
 from mani_sim.factory import registry
 from mani_sim.runners.rollout import rollout_policy
 from mani_sim.utils.checkpoints import load_run_config
-from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_obs_keys
+from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_obs_keys
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +110,13 @@ def _run_dp_eval(cfg, device):
     if cfg.save_gif and is_image_task(cfg.task):
         env = make_eval_env(cfg.task)
         gif_frames = []
+        # Piper task는 3인칭 카메라 이름이 다르다(camera_names.front="front_cam" vs
+        # robosuite의 "agentview") - env_backend로 분기해서 고른다(2026-07-26).
+        gif_camera = cfg.task.camera_names.front if is_piper_task(cfg.task) else "agentview"
 
         def on_episode_step(env_, ep, step):
             if ep == 0 and step % 4 == 0:
-                frame = env_.render(mode="rgb_array", height=256, width=256, camera_name="agentview")
+                frame = env_.render(mode="rgb_array", height=256, width=256, camera_name=gif_camera)
                 from PIL import Image
                 gif_frames.append(Image.fromarray(frame))
     elif cfg.render:

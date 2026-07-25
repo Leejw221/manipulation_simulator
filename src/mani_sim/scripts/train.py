@@ -27,7 +27,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from mani_sim.factory import registry
-from mani_sim.utils.task_utils import derive_task_meta_from_hdf5
+from mani_sim.utils.task_utils import derive_task_meta
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +36,11 @@ logger = logging.getLogger(__name__)
 def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
-    # env_name/robots/env_kwargs/obs_dims/action_dim/camera_names는 hdf5가 유일한 출처 —
-    # task.yaml 손으로 적은 값이 데이터와 어긋나는 걸 검증하는 대신 여기서 덮어써 원천 차단
-    # (2026-07-25). policy 생성(obs_dims/action_dim 필요) 전에 반드시 먼저 호출해야 함.
-    derive_task_meta_from_hdf5(cfg.task)
+    # env_name/robots/env_kwargs/obs_dims/action_dim/camera_names는 데이터(hdf5 또는 zarr)가
+    # 유일한 출처 — task.yaml 손으로 적은 값이 데이터와 어긋나는 걸 검증하는 대신 여기서
+    # 덮어써 원천 차단(2026-07-25, env_backend=piper_mujoco 분기 2026-07-26 추가).
+    # policy 생성(obs_dims/action_dim 필요) 전에 반드시 먼저 호출해야 함.
+    derive_task_meta(cfg.task)
     logger.info(f"policy={cfg.policy_name} runner={cfg.runner_name} task={cfg.task.name} device={device}")
 
     runner_cls = registry.get_runner_class(cfg.runner_name)

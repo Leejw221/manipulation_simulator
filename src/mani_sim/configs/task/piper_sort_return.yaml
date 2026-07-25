@@ -1,0 +1,22 @@
+# 단일 Piper 팔 + 2행3열(spot/zone) 블록 왕복 task(2026-07-26 확정 설계, state-aliasing
+# 검증 완료 - EXP 기록 참고). robosuite가 아닌 raw MuJoCo라 env_backend로 분기한다
+# (env_name/robots/env_kwargs 같은 robosuite 전용 필드는 없음).
+name: piper_sort_return
+env_backend: piper_mujoco
+xml_path: mani_sim_external/piper_capstone/piper_sort_return.xml
+zarr_path: data/piper_sort_return/piper_sort_return.zarr
+
+camera_names:
+  front: front_cam
+  wrist: wrist_cam
+image_size: [84, 84]
+rgb_keys: [front_image, wrist_image]
+lowdim_keys: [state]
+
+# obs_dims/action_dim: Piper 로봇 구조상 고정값(6 joint + gripper)이라 기본값을 적어두되,
+# 실제 학습 시점엔 derive_task_meta_from_zarr가 zarr에서 다시 채워 덮어쓴다(hdf5 task와
+# 동일 철학 - 2026-07-25 리팩터). collect.py의 round0(데이터 아직 없음) 수집엔 zarr가
+# 없어 derive를 못 하므로, 이 기본값이 그 시점의 유일한 출처가 된다.
+obs_dims:
+  state: 7
+action_dim: 7

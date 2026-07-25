@@ -50,6 +50,32 @@ def compute_minmax_stats(hdf5_path, obs_keys, action_key="actions"):
     return stats
 
 
+def compute_minmax_stats_zarr(zarr_path, obs_keys, action_key="action"):
+    """zarr(ReplayBuffer) 버전의 compute_minmax_stats - robomimic처럼 demo 단위로 나눌
+    필요 없이(min/max는 데모 경계와 무관) 전체 프레임 배열에서 바로 계산한다. 반환 형식은
+    compute_minmax_stats와 동일(MinMaxNormalizer가 출처를 구분할 필요 없게)."""
+    import sys
+    from pathlib import Path
+
+    piper_capstone_dir = Path(__file__).resolve().parents[3] / "mani_sim_external" / "piper_capstone"
+    if str(piper_capstone_dir) not in sys.path:
+        sys.path.insert(0, str(piper_capstone_dir))
+    from replay_buffer import ReplayBuffer
+
+    buffer = ReplayBuffer.create_from_path(str(zarr_path), mode="r")
+    stats = {
+        "obs": {
+            k: {"min": buffer.data[k][:].min(axis=0).tolist(), "max": buffer.data[k][:].max(axis=0).tolist()}
+            for k in obs_keys
+        },
+        "action": {
+            "min": buffer.data[action_key][:].min(axis=0).tolist(),
+            "max": buffer.data[action_key][:].max(axis=0).tolist(),
+        },
+    }
+    return stats
+
+
 def save_stats(stats, path):
     with open(path, "w") as f:
         json.dump(stats, f, indent=2)

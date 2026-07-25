@@ -1,20 +1,30 @@
-"""사람 개입 rollout으로 개입 데이터셋 수집. 입력 장치는 키보드 또는 PICO VR.
+"""사람 개입 rollout으로 개입 데이터셋 수집. 입력 장치는 키보드 또는 PICO VR(robosuite
+task) / 키보드+Placo IK(Piper task, env_backend=piper_mujoco로 task.yaml이 결정).
 (구 collect_intervention.py — train.py/eval.py와 동사 기준 이름 통일을 위해 리네임.)
 
 사용:
-    # PICO(기본) — 화면에서 실행, PICO 연결 필요
+    # PICO(기본, robosuite task) — 화면에서 실행, PICO 연결 필요
     python -m mani_sim.scripts.collect checkpoint_path=outputs/train/.../policy_epochN.pt
 
-    # 키보드 개입으로 전환
+    # 키보드 개입으로 전환(robosuite task)
     python -m mani_sim.scripts.collect intervention_device=keyboard
+
+    # Piper task(env_backend=piper_mujoco) — piper_collect conda env에서 실행 필요
+    # (flare/lerobot/placo 의존, mani_sim 기본 env엔 없음). 저장 포맷도 이 task만 lerobot
+    # (LeRobotDataset)로 다르다 - 연구실 표준 포맷과 맞추기 위한 선택(2026-07-26).
+    <piper_collect>/bin/python -m mani_sim.scripts.collect task=piper_sort_return
 
     # 정책 없이 조작·저장 경로만 먼저 테스트
     python -m mani_sim.scripts.collect num_episodes=1
 
 조작(PICO): B=개입 on/off · grip=클러치(잡은 동안만 팔 이동) · trigger=그리퍼 ·
             A=시점 전환(정면→각진→top→측면 순환, 깊이 판단용) · Y=에피소드 종료.
-조작(키보드): toggle_key(기본 Ctrl)=개입 on/off · 화살표/회전키=이동 · space=그리퍼 · Enter=종료.
-저장물은 robomimic 형식 HDF5(+action_mode)라 학습에 바로 쓴다.
+조작(키보드, robosuite): toggle_key(기본 Ctrl)=개입 on/off · 화살표/회전키=이동 ·
+            space=그리퍼 · Enter=종료.
+조작(키보드, Piper): wasdqe=이동 uoikjl=회전 f=그리퍼 토글 Enter=종료(항상 사람이 조작,
+            토글 없음 - round0 수집이 주 용도라서, PiperKeyboardIntervention 참고).
+저장물: robosuite task는 robomimic 형식 HDF5(+action_mode), Piper task는 LeRobotDataset
+(parquet+video) - 학습 시 convert_lerobot_to_zarr.py로 zarr 변환 필요.
 """
 
 import hydra
@@ -27,7 +37,84 @@ from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
 from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats
 from mani_sim.factory import registry
 from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
-from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_lowdim_keys, task_obs_keys
+from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_lowdim_keys, task_obs_keys
+
+
+def _is_piper_task(cfg):
+    return is_piper_task(cfg.task)
+
+
+def _make_piper_render_fn():
+    """Piper 텔레옵용 시각화 - mujoco 온스크린 뷰어(GLFW) 대신 lerobot 자체 시각화
+    (rerun, `--display_data=true`가 record.py에서 쓰는 것과 동일 저수준 함수)를 재사용한다
+    (2026-07-26, 사용자 제안). 실물 하드웨어 텔레옵과 같은 방식이라 더 일관되고, rerun은
+    완전히 별도 프로세스/창이라 front_cam/wrist_cam 오프스크린 렌더와 GL 컨텍스트를 공유하지
+    않는다(mujoco 온스크린 뷰어를 썼으면 있었을 충돌 우려가 아예 없음) - 카메라 화면 +
+    joint(state) 값을 실시간 창(rerun viewer)으로 보여준다.
+
+    collect_episode()의 render_fn(obs_raw) 콜백 하나만 채워주면 되고(action은 이 콜백엔
+    안 넘어와서 로그 안 함 - 관측만으로도 조작엔 충분, 필요해지면 나중에 추가), 에피소드
+    흐름 제어(Enter=종료)는 이미 PiperKeyboardIntervention이 담당하므로 항상 True 반환."""
+    from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+
+    init_rerun(session_name="piper_collect")
+
+    def render_fn(obs_raw):
+        log_rerun_data(observation=obs_raw)
+        return True
+
+    return render_fn
+
+
+def _write_piper_lerobot(cfg, episodes, obs_keys):
+    """Piper task 전용 저장 - robomimic HDF5(write_intervention_hdf5) 대신 LeRobotDataset
+    (연구실 표준 포맷 - 2026-07-26 사용자 결정). obs_keys는 이미 collect_episode()가
+    front_image/wrist_image/state 형태로 모아뒀으니 observation.images.<cam>/
+    observation.state로 이름만 맞춰 옮긴다. finalize() 필수(실측 확인: 안 하면
+    meta/episodes/*.parquet가 안 써져 다시 못 읽음, 2026-07-26 실측으로 발견한 버그)."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    camera_keys = [k[: -len("_image")] for k in obs_keys if k.endswith("_image")]
+    lowdim_keys = [k for k in obs_keys if not k.endswith("_image")]
+    action_dim = episodes[0]["actions"].shape[-1] if episodes else cfg.task.action_dim
+    # PiperMujocoEnv(robot_mode=single) 규약: [joint1..6, gripper] - state_feature_names() 참고.
+    joint_names = [f"joint{i}.pos" for i in range(1, 7)] + ["gripper.pos"]
+
+    features = {
+        "action": {"dtype": "float32", "shape": (action_dim,), "names": joint_names},
+        "observation.state": {"dtype": "float32", "shape": (action_dim,), "names": joint_names},
+    }
+    for key in camera_keys:
+        sample_shape = episodes[0]["obs"][0][f"{key}_image"].shape if episodes else (84, 84, 3)
+        features[f"observation.images.{key}"] = {
+            "dtype": "video", "shape": tuple(sample_shape), "names": ["height", "width", "channels"],
+        }
+
+    dataset = LeRobotDataset.create(
+        repo_id=cfg.repo_id, fps=cfg.control_fps, root=cfg.output_root,
+        robot_type="piper_single_mujoco", features=features, use_videos=True,
+    )
+    try:
+        for ep in episodes:
+            for t in range(len(ep["actions"])):
+                frame = {
+                    "action": ep["actions"][t].astype("float32"),
+                    "observation.state": ep["obs"][t][lowdim_keys[0]].astype("float32"),
+                    "task": cfg.task_description,
+                }
+                for key in camera_keys:
+                    # collect_episode()가 obs_seq를 전부 np.float32로 캐스팅해서(intervention_rollout.py)
+                    # 이미지도 [0,255] 범위의 float32가 돼 있음(uint8 아님) - lerobot의 이미지 writer는
+                    # uint8 [0,255] 또는 float [0,1]만 받아서, 여기서 다시 uint8로 되돌려야 함
+                    # (실측 확인: 2026-07-26, 안 하면 PNG 저장 단계에서 조용히 실패 후 나중에
+                    # save_episode()에서 FileNotFoundError로 터짐).
+                    img = np.clip(ep["obs"][t][f"{key}_image"], 0, 255).astype(np.uint8)
+                    frame[f"observation.images.{key}"] = img
+                dataset.add_frame(frame)
+            dataset.save_episode()
+    finally:
+        dataset.finalize()
+    return cfg.output_root
 
 
 def _build_policy_predict_fn(cfg, device, action_horizon):
@@ -36,21 +123,28 @@ def _build_policy_predict_fn(cfg, device, action_horizon):
     DiffusionPolicyLowDim 하드코딩을 registry.create_policy로 일반화 — round.py가
     policy_name=bc_rnn_lowdim으로도 라운드를 돌릴 수 있어야 해서, 2026-07-19.)
 
-    checkpoint_path=None + hdf5_path도 아직 없으면(새 task의 첫 수집, round0) 신경망 자체를
-    안 만들고 제자리(zero-action) stub을 쓴다 - 어차피 PICO 개입이 매 스텝 override하니
-    무작위 초기화 정책을 굳이 돌려 로봇이 개입 전에 제멋대로 움직이게 둘 이유가 없다.
+    checkpoint_path=None + 데이터(hdf5 또는 Piper의 zarr)도 아직 없으면(새 task의 첫 수집,
+    round0) 신경망 자체를 안 만들고 제자리(zero-action) stub을 쓴다 - 어차피 개입이 매 스텝
+    override하니 무작위 초기화 정책을 굳이 돌려 로봇이 개입 전에 제멋대로 움직이게 둘 이유가
+    없다.
     """
     import os
 
     from mani_sim.runners.intervention_rollout import _predict_chunk
 
-    if cfg.checkpoint_path is None and not os.path.exists(cfg.task.hdf5_path):
-        print(f"hdf5 없음({cfg.task.hdf5_path}) + checkpoint 없음 -> 정책 없이 제자리(zero-action) "
+    data_path = cfg.task.zarr_path if _is_piper_task(cfg) else cfg.task.hdf5_path
+    if cfg.checkpoint_path is None and not os.path.exists(data_path):
+        print(f"데이터 없음({data_path}) + checkpoint 없음 -> 정책 없이 제자리(zero-action) "
               "stub 사용 (round0 첫 수집 - 개입 켜기 전엔 로봇이 가만히 있음)")
         zero_chunk = np.zeros((action_horizon, cfg.task.action_dim), dtype=np.float32)
         return None, lambda history: zero_chunk
 
-    stats = compute_minmax_stats(cfg.task.hdf5_path, task_lowdim_keys(cfg.task))
+    if _is_piper_task(cfg):
+        from mani_sim.datasets.normalization import compute_minmax_stats_zarr
+
+        stats = compute_minmax_stats_zarr(cfg.task.zarr_path, task_lowdim_keys(cfg.task))
+    else:
+        stats = compute_minmax_stats(cfg.task.hdf5_path, task_lowdim_keys(cfg.task))
     normalizer = MinMaxNormalizer(stats)
     policy = registry.create_policy(cfg.policy_name, cfg.task, cfg.policy).to(device)
 
@@ -133,9 +227,11 @@ def main(cfg: DictConfig):
             # 알아서 오프스크린으로 렌더한다(EnvRobosuite가 내부적으로 둘 다 처리). make_eval_env는
             # image+render를 여기서 처리 안 하므로(문서화된 지뢰) 생성 후 그대로 직접 패치한다.
             env = make_eval_env(cfg.task, env_kwargs_override=env_kwargs)
-            if cfg.render:
+            if cfg.render and not _is_piper_task(cfg):
                 env.env.has_renderer = True
                 env.env.renderer = "mjviewer"
+            # Piper의 시각화(render=true)는 mjviewer가 아니라 rerun(아래 intervention
+            # 생성부에서 render_fn으로 연결) - env 생성 시점엔 할 게 없음.
             obs_keys = task_obs_keys(cfg.task)
         else:
             env = make_eval_env(cfg.task, render=cfg.render, env_kwargs_override=env_kwargs)
@@ -145,7 +241,13 @@ def main(cfg: DictConfig):
 
     cycler = None
     render_fn = None
-    if cfg.intervention_device == "pico":
+    if _is_piper_task(cfg):
+        from mani_sim.runners.piper_intervention import PiperKeyboardIntervention
+
+        intervention = PiperKeyboardIntervention(control_fps=cfg.control_fps)
+        if cfg.render:
+            render_fn = _make_piper_render_fn()
+    elif cfg.intervention_device == "pico":
         from mani_sim.runners.pico_intervention import PICOIntervention
 
         intervention = PICOIntervention(
@@ -229,7 +331,10 @@ def main(cfg: DictConfig):
                 max_steps=cfg.max_steps,
                 should_end_fn=intervention.should_end,
                 preintv_length=cfg.preintv_length,
-                render=cfg.render,
+                # Piper는 render_fn(rerun 로깅, _make_piper_render_fn)이 시각화를 담당하므로
+                # 여기서 env.render(mode="human")를 또 호출할 필요 없음(불필요한 오프스크린
+                # 렌더 인스턴스 하나가 더 생기는 걸 막음).
+                render=cfg.render and not _is_piper_task(cfg),
                 render_fn=render_fn,
                 control_fps=cfg.control_fps,
                 predict_fn=predict_fn,
@@ -254,7 +359,10 @@ def main(cfg: DictConfig):
         except Exception:
             pass
 
-    out = write_intervention_hdf5(cfg.output_path, episodes, obs_keys)
+    if _is_piper_task(cfg):
+        out = _write_piper_lerobot(cfg, episodes, obs_keys)
+    else:
+        out = write_intervention_hdf5(cfg.output_path, episodes, obs_keys)
     print("저장:", out, "| 총 에피소드:", len(episodes))
 
 

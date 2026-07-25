@@ -11,6 +11,10 @@ def is_image_task(task_cfg):
     return "rgb_keys" in task_cfg
 
 
+def is_piper_task(task_cfg):
+    return task_cfg.get("env_backend", "robosuite") == "piper_mujoco"
+
+
 def task_obs_keys(task_cfg):
     if is_image_task(task_cfg):
         return list(task_cfg.rgb_keys) + list(task_cfg.lowdim_keys)
@@ -56,6 +60,38 @@ def derive_task_meta_from_hdf5(task_cfg):
     return task_cfg
 
 
+def derive_task_meta_from_zarr(task_cfg):
+    """derive_task_meta_from_hdf5의 zarr(비-robosuite task, 예: Piper) 버전 - env_name/
+    robots/env_kwargs는 robosuite 전용 개념이라 애초에 없음(raw MuJoCo라 env_backend
+    분기로 make_eval_env가 직접 xml_path/camera_names를 읽음). obs_dims/action_dim만
+    zarr 배열 shape에서 그대로 derive(2026-07-26)."""
+    import sys
+    from pathlib import Path
+
+    piper_capstone_dir = Path(__file__).resolve().parents[3] / "mani_sim_external" / "piper_capstone"
+    if str(piper_capstone_dir) not in sys.path:
+        sys.path.insert(0, str(piper_capstone_dir))
+    from replay_buffer import ReplayBuffer
+
+    buffer = ReplayBuffer.create_from_path(str(task_cfg.zarr_path), mode="r")
+    obs_dims = {k: int(buffer.data[k].shape[-1]) for k in task_lowdim_keys(task_cfg) if k in buffer.data}
+    action_dim = int(buffer.data["action"].shape[-1])
+
+    OmegaConf.set_struct(task_cfg, False)
+    task_cfg.obs_dims = obs_dims
+    task_cfg.action_dim = action_dim
+    OmegaConf.set_struct(task_cfg, True)
+    return task_cfg
+
+
+def derive_task_meta(task_cfg):
+    """env_backend에 따라 derive_task_meta_from_hdf5/_from_zarr 중 맞는 쪽으로 분기.
+    train.py는 이 함수 하나만 호출하면 됨(2026-07-26)."""
+    if is_piper_task(task_cfg):
+        return derive_task_meta_from_zarr(task_cfg)
+    return derive_task_meta_from_hdf5(task_cfg)
+
+
 def make_eval_env(task_cfg, render=False, renderer="mjviewer", image_size_override=None, env_kwargs_override=None):
     """train/eval/collect 3곳에서 각자 env를 만들던 걸 통합(2026-07-25) — task_cfg 필드를
     풀어쓰는 로직이 세 군데 복사돼 있었고, 그중 하나(collect.py)는 env_kwargs를 통째로
@@ -65,7 +101,22 @@ def make_eval_env(task_cfg, render=False, renderer="mjviewer", image_size_overri
     image task + render=True는 여기서 처리하지 않는다(호출부 책임) — cv2 오프스크린 렌더와
     mjviewer 온스크린이 GL 컨텍스트 충돌로 세그폴트하는 게 문서화된 지뢰라, image 쪽은
     make_image_env 생성 *후에* `env.env.has_renderer` 등을 직접 패치하는 방식을 그대로 둔다
-    (collect.py 참고, eval.py는 image+render 자체를 막음)."""
+    (collect.py 참고, eval.py는 image+render 자체를 막음).
+
+    env_backend="piper_mujoco"(2026-07-26)면 robosuite 경로를 아예 안 타고 raw MuJoCo
+    어댑터(PiperSortReturnEnv)로 분기한다 — robosuite가 지원 안 하는 로봇(Piper)용."""
+    if is_piper_task(task_cfg):
+        from mani_sim.envs.piper.piper_sort_return_env import PiperSortReturnEnv
+
+        image_size = image_size_override or tuple(task_cfg.image_size)
+        if isinstance(image_size, int):
+            image_size = (image_size, image_size)
+        return PiperSortReturnEnv(
+            xml_path=task_cfg.xml_path,
+            camera_names=dict(task_cfg.camera_names) if task_cfg.get("camera_names") else None,
+            image_size=image_size,
+        )
+
     gripper_types = task_cfg.get("gripper_types", None)
     if env_kwargs_override is not None:
         env_kwargs = env_kwargs_override

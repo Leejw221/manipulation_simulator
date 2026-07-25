@@ -3,6 +3,11 @@
 robomimic 전용 코드(robomimic.utils.dataset.SequenceDataset, obs_utils)는 이 파일 안에만 둔다
 (docs/plan.md 설계원칙 3: 벤치마크 코드 격리).
 
+robomimic import는 함수/생성자 안에서 지연 로드한다(2026-07-26) — robomimic이 설치 안 된
+env(예: Piper 텔레옵용 piper_collect env)에서도 이 모듈을 import만은 할 수 있어야
+factory.py의 registry 등록 부수효과 import 체인이 안 깨진다(실제로 robosuite task를 쓸
+때만 robomimic이 필요).
+
 robomimic SequenceDataset은 frame_stack(=To)·seq_length(=Tp)를 합쳐 길이
 (To - 1 + Tp)짜리 하나의 윈도우를 obs·action 양쪽에 동일하게 반환한다 — 즉 obs와
 action의 윈도우가 같은 배열이고, 그 안에서 "관측 이력"과 "예측할 행동 구간"을
@@ -10,12 +15,12 @@ action의 윈도우가 같은 배열이고, 그 안에서 "관측 이력"과 "�
 Tp개=action)을 수행해 Diffusion Policy가 바로 쓸 수 있는 형태로 재구성한다.
 """
 
-import robomimic.utils.obs_utils as ObsUtils
 import torch
-from robomimic.utils.dataset import SequenceDataset
 
 
 def _ensure_obs_utils_initialized(low_dim_keys, rgb_keys=()):
+    import robomimic.utils.obs_utils as ObsUtils
+
     if ObsUtils.OBS_KEYS_TO_MODALITIES is not None:
         return
     ObsUtils.initialize_obs_utils_with_obs_specs(
@@ -59,6 +64,8 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
         self.normalizer = normalizer
         self.action_key = action_key
         self.extra_keys = list(extra_keys)  # 예: action_mode(SIRIUS/APO 4-class 라벨)
+
+        from robomimic.utils.dataset import SequenceDataset
 
         self._seq_dataset = SequenceDataset(
             hdf5_path=hdf5_path,

@@ -26,15 +26,18 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats, save_stats
+from mani_sim.datasets.normalization import (
+    MinMaxNormalizer, compute_minmax_stats, compute_minmax_stats_zarr, save_stats,
+)
 from mani_sim.datasets.robomimic_dataset import RobomimicSequenceDataset
+from mani_sim.datasets.zarr_dataset import ZarrSequenceDataset
 from mani_sim.factory import registry
 from mani_sim.losses.sirius_loss import sirius_loss
 from mani_sim.runners.rollout import rollout_policy
 from mani_sim.utils.checkpoints import (
     get_latest_epoch_checkpoint, load_resume_state, save_epoch_checkpoint, save_resume_state, save_run_config,
 )
-from mani_sim.utils.task_utils import is_image_task, make_eval_env, task_lowdim_keys, task_obs_keys
+from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_lowdim_keys, task_obs_keys
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +50,14 @@ class DiffusionTrainer:
         self.device = device
         self.task_cfg = cfg.task
         self.is_image = is_image_task(cfg.task)
+        self.is_piper = is_piper_task(cfg.task)
         os.makedirs(cfg.output_dir, exist_ok=True)
 
         lowdim_keys = task_lowdim_keys(cfg.task)
-        stats = compute_minmax_stats(cfg.task.hdf5_path, lowdim_keys)
+        if self.is_piper:
+            stats = compute_minmax_stats_zarr(cfg.task.zarr_path, lowdim_keys)
+        else:
+            stats = compute_minmax_stats(cfg.task.hdf5_path, lowdim_keys)
         save_stats(stats, os.path.join(cfg.output_dir, "normalization_stats.json"))
         self.normalizer = MinMaxNormalizer(stats)
 
@@ -108,17 +115,29 @@ class DiffusionTrainer:
             )
         self.weighting_kind = weighting_kind
 
-        cache_mode = "all" if cfg.num_workers >= 1 else "low_dim"  # h5py fork 크래시 회피(지뢰, mani_sim_status.md)
-        self.dataset = RobomimicSequenceDataset(
-            hdf5_path=cfg.task.hdf5_path,
-            obs_keys=task_obs_keys(cfg.task),
-            obs_horizon=cfg.policy.obs_horizon,
-            pred_horizon=cfg.policy.pred_horizon,
-            normalizer=self.normalizer,
-            rgb_keys=cfg.task.rgb_keys if self.is_image else (),
-            hdf5_cache_mode=cache_mode,
-            extra_keys=extra_keys,
-        )
+        if self.is_piper:
+            self.dataset = ZarrSequenceDataset(
+                zarr_path=cfg.task.zarr_path,
+                obs_keys=task_obs_keys(cfg.task),
+                obs_horizon=cfg.policy.obs_horizon,
+                pred_horizon=cfg.policy.pred_horizon,
+                normalizer=self.normalizer,
+                rgb_keys=cfg.task.rgb_keys if self.is_image else (),
+                extra_keys=extra_keys,
+            )
+            cache_mode = "n/a(zarr)"
+        else:
+            cache_mode = "all" if cfg.num_workers >= 1 else "low_dim"  # h5py fork 크래시 회피(지뢰, mani_sim_status.md)
+            self.dataset = RobomimicSequenceDataset(
+                hdf5_path=cfg.task.hdf5_path,
+                obs_keys=task_obs_keys(cfg.task),
+                obs_horizon=cfg.policy.obs_horizon,
+                pred_horizon=cfg.policy.pred_horizon,
+                normalizer=self.normalizer,
+                rgb_keys=cfg.task.rgb_keys if self.is_image else (),
+                hdf5_cache_mode=cache_mode,
+                extra_keys=extra_keys,
+            )
         self.dataloader = DataLoader(
             self.dataset, batch_size=cfg.batch_size, shuffle=True,
             num_workers=cfg.num_workers, drop_last=True, persistent_workers=cfg.num_workers >= 1,

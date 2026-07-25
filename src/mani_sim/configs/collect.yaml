@@ -27,7 +27,13 @@ control_fps: 20            # 실시간 페이싱(Hz). 사람이 보고 개입할
 render: true               # 사람이 보고 개입하려면 true (화면 필요)
 output_path: outputs/intervention/${task.name}_round.hdf5
 
-# 개입 입력 장치: pico | keyboard
+# Piper task(env_backend=piper_mujoco) 전용 저장 설정 - robosuite task는 안 씀(위 output_path
+# 사용). lerobot 포맷(연구실 표준 - 2026-07-26 결정) 유지, robomimic HDF5로 안 감.
+repo_id: mani_sim/${task.name}
+output_root: data/${task.name}/lerobot_raw
+task_description: "teleoperated demonstration"
+
+# 개입 입력 장치: pico | keyboard (Piper task는 이 값과 무관하게 항상 키보드+Placo IK)
 intervention_device: pico
 
 # 키보드 개입용 (device=keyboard일 때만 사용)
