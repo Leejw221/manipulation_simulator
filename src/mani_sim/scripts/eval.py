@@ -34,14 +34,22 @@ logger = logging.getLogger(__name__)
 
 def _apply_run_config(cfg):
     """checkpoint_path 옆 run_config.yaml(학습 시 자동 저장)이 있으면 task/policy/policy_name을
-    거기서 덮어써 학습·추론 설정이 어긋나는 걸 막는다(2026-07-25). 없으면(구 체크포인트,
-    openvla는 아직 저장 안 함) 아무것도 안 하고 기존 CLI 값 그대로 진행."""
+    거기서 통째로 교체해 학습·추론 설정이 어긋나는 걸 막는다(2026-07-25). 없으면(구 체크포인트,
+    openvla는 아직 저장 안 함) 아무것도 안 하고 기존 CLI 값 그대로 진행.
+
+    ⚠ OmegaConf.merge가 아니라 직접 대입으로 교체한다 — merge는 하위 dict까지 깊은 병합이라,
+    eval.yaml 기본 task(square)에만 있고 실제 학습 task(예: transport)엔 없는 필드가
+    살아남는 걸 실측으로 확인함(예: transport 기본값일 때 square 체크포인트를 평가하면
+    transport의 env_kwargs가 안 지워지고 섞여 들어감 — 정확히 7/21에 사고 낸 그 종류의
+    필드). 직접 대입은 완전 교체라 이 문제가 없음(마찬가지로 실측 확인)."""
     if not cfg.get("use_run_config", True) or not cfg.checkpoint_path:
         return cfg
     saved = load_run_config(cfg.checkpoint_path)
     if saved is None:
         return cfg
-    cfg = OmegaConf.merge(cfg, {"task": saved.task, "policy": saved.policy, "policy_name": saved.policy_name})
+    cfg.task = saved.task
+    cfg.policy = saved.policy
+    cfg.policy_name = saved.policy_name
     logger.info(f"run_config.yaml에서 자동 적용: task={saved.task.name} policy_name={saved.policy_name}")
     return cfg
 
