@@ -44,13 +44,23 @@ def _is_piper_task(cfg):
     return is_piper_task(cfg.task)
 
 
+def _attach_piper_mujoco_viewer(env):
+    """자유 시점 3D 씬 뷰어(mujoco 온스크린, GLFW) - eval 때 보던 것과 같은 종류.
+    PiperMujocoEnv.apply_action()이 매 스텝 알아서 self._sync_viewer()를 호출하므로
+    (원본 코드, 손 안 댐) env._env.viewer에 핸들만 꽂아두면 그 뒤론 자동 갱신된다.
+    아래 rerun(카메라+joint 대시보드)과 별개 용도라 둘 다 띄운다(2026-07-26, 사용자 요청 -
+    rerun만으로는 "eval 때 보던 자유 시점 3D 뷰"가 없어서 부족하다는 피드백)."""
+    import mujoco.viewer
+
+    env._env.viewer = mujoco.viewer.launch_passive(env._env.model, env._env.data)
+
+
 def _make_piper_render_fn():
-    """Piper 텔레옵용 시각화 - mujoco 온스크린 뷰어(GLFW) 대신 lerobot 자체 시각화
-    (rerun, `--display_data=true`가 record.py에서 쓰는 것과 동일 저수준 함수)를 재사용한다
-    (2026-07-26, 사용자 제안). 실물 하드웨어 텔레옵과 같은 방식이라 더 일관되고, rerun은
-    완전히 별도 프로세스/창이라 front_cam/wrist_cam 오프스크린 렌더와 GL 컨텍스트를 공유하지
-    않는다(mujoco 온스크린 뷰어를 썼으면 있었을 충돌 우려가 아예 없음) - 카메라 화면 +
-    joint(state) 값을 실시간 창(rerun viewer)으로 보여준다.
+    """카메라+joint 값을 보여주는 대시보드 - lerobot 자체 시각화(rerun, `--display_data=true`
+    가 record.py에서 쓰는 것과 동일 저수준 함수)를 재사용한다(2026-07-26). 실물 하드웨어
+    텔레옵과 같은 방식이라 더 일관되고, rerun은 완전히 별도 프로세스/창이라 front_cam/
+    wrist_cam 오프스크린 렌더와 GL 컨텍스트를 공유하지 않는다 - 위 mujoco 뷰어와 같이 띄워도
+    서로 안 부딪힌다.
 
     collect_episode()의 render_fn(obs_raw) 콜백 하나만 채워주면 되고(action은 이 콜백엔
     안 넘어와서 로그 안 함 - 관측만으로도 조작엔 충분, 필요해지면 나중에 추가), 에피소드
@@ -246,6 +256,7 @@ def main(cfg: DictConfig):
 
         intervention = PiperKeyboardIntervention(control_fps=cfg.control_fps)
         if cfg.render:
+            _attach_piper_mujoco_viewer(env)
             render_fn = _make_piper_render_fn()
     elif cfg.intervention_device == "pico":
         from mani_sim.runners.pico_intervention import PICOIntervention
@@ -352,6 +363,8 @@ def main(cfg: DictConfig):
                 break
     finally:
         intervention.close()
+        if _is_piper_task(cfg) and env._env.viewer is not None:
+            env._env.viewer.close()
         try:
             import cv2
 
