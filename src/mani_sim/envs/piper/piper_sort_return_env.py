@@ -97,3 +97,45 @@ class PiperSortReturnEnv:
 
     def close(self):
         self._env.disconnect()
+
+    def attach_viewer(self):
+        """자유 시점 3D 씬 뷰어(mujoco 온스크린, GLFW) - eval 때 보던 것과 같은 종류.
+        PiperMujocoEnv.apply_action()이 매 스텝 알아서 self._sync_viewer()를 호출하므로
+        (원본 코드, 손 안 댐) self._env.viewer에 핸들만 꽂아두면 그 뒤론 자동 갱신된다.
+        조작 기기(키보드/PICO)와 무관하게 이 env 자체가 아는 시각화라 여기 둔다
+        (2026-07-26 - 기기 구현 파일에서 env._env 내부를 직접 건드리던 걸 분리).
+
+        ⚠ 실측(2026-07-26, "moai-pobi"): NVIDIA 드라이버/커널모듈 버전 불일치로 실패한 적
+        있음(재부팅으로 해결, HANDOFF.md 참고) - 재발 대비로 실패해도 죽지 않게 감싼다."""
+        import logging
+
+        import mujoco.viewer
+
+        try:
+            self._env.viewer = mujoco.viewer.launch_passive(self._env.model, self._env.data)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"mujoco 온스크린 뷰어 생성 실패({type(e).__name__}: {e}) - rerun 시각화만으로 "
+                "계속 진행합니다."
+            )
+
+    def close_viewer(self):
+        """attach_viewer()로 띄운 창을 닫는다 - collect.py/teleoperate.py가 종료 시 공유 호출."""
+        if self._env.viewer is not None:
+            self._env.viewer.close()
+
+    def cycle_camera(self):
+        """자유시점 <-> front_cam 토글(2026-07-26, PICO A버튼용) - attach_viewer()로 만든
+        온스크린 뷰어의 카메라를 코드에서 직접 바꾼다(뷰어 자체 키보드 단축키 대신 컨트롤러
+        버튼으로 조작하려는 용도). 뷰어가 없으면(attach_viewer 실패/미호출) 아무 것도 안 함."""
+        import mujoco
+
+        viewer = self._env.viewer
+        if viewer is None:
+            return
+        if viewer.cam.type == mujoco.mjtCamera.mjCAMERA_FREE:
+            cam_id = mujoco.mj_name2id(self._env.model, mujoco.mjtObj.mjOBJ_CAMERA, "front_cam")
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+            viewer.cam.fixedcamid = cam_id
+        else:
+            viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE

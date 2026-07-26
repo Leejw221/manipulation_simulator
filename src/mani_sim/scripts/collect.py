@@ -48,50 +48,6 @@ def _is_piper_task(cfg):
     return is_piper_task(cfg.task)
 
 
-def _attach_piper_mujoco_viewer(env):
-    """자유 시점 3D 씬 뷰어(mujoco 온스크린, GLFW) - eval 때 보던 것과 같은 종류.
-    PiperMujocoEnv.apply_action()이 매 스텝 알아서 self._sync_viewer()를 호출하므로
-    (원본 코드, 손 안 댐) env._env.viewer에 핸들만 꽂아두면 그 뒤론 자동 갱신된다.
-    아래 rerun(카메라+joint 대시보드)과 별개 용도라 둘 다 띄운다(2026-07-26, 사용자 요청 -
-    rerun만으로는 "eval 때 보던 자유 시점 3D 뷰"가 없어서 부족하다는 피드백).
-
-    ⚠ 실측 확인(2026-07-26, 실제 랩 PC "moai-pobi"): 이 GLFW 창 생성이 이 머신에서 GLX
-    에러로 실패함(개발 중 의심했던 "원격 샌드박스라 그럴 것"이라는 추정이 틀렸음 - 실제
-    PC에서도 동일 에러, 근본 원인은 머신 전체의 GLX 드라이버 문제로 보임). rerun(Vulkan)은
-    같은 머신에서 정상 동작 확인됨. 그래서 실패해도 전체 수집이 죽지 않게 try/except로
-    감싸고 경고만 남긴다 - 고쳐질 때까지 rerun만으로 시각화."""
-    import mujoco.viewer
-
-    try:
-        env._env.viewer = mujoco.viewer.launch_passive(env._env.model, env._env.data)
-    except Exception as e:
-        logger.warning(
-            f"mujoco 온스크린 뷰어 생성 실패({type(e).__name__}: {e}) - GLX 드라이버 문제로 "
-            "추정됨(실측: moai-pobi에서도 재현). rerun 시각화만으로 계속 진행합니다."
-        )
-
-
-def _make_piper_render_fn():
-    """카메라+joint 값을 보여주는 대시보드 - lerobot 자체 시각화(rerun, `--display_data=true`
-    가 record.py에서 쓰는 것과 동일 저수준 함수)를 재사용한다(2026-07-26). 실물 하드웨어
-    텔레옵과 같은 방식이라 더 일관되고, rerun은 완전히 별도 프로세스/창이라 front_cam/
-    wrist_cam 오프스크린 렌더와 GL 컨텍스트를 공유하지 않는다 - 위 mujoco 뷰어와 같이 띄워도
-    서로 안 부딪힌다.
-
-    collect_episode()의 render_fn(obs_raw) 콜백 하나만 채워주면 되고(action은 이 콜백엔
-    안 넘어와서 로그 안 함 - 관측만으로도 조작엔 충분, 필요해지면 나중에 추가), 에피소드
-    흐름 제어(Enter=종료)는 이미 PiperKeyboardIntervention이 담당하므로 항상 True 반환."""
-    from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-
-    init_rerun(session_name="piper_collect")
-
-    def render_fn(obs_raw):
-        log_rerun_data(observation=obs_raw)
-        return True
-
-    return render_fn
-
-
 def _write_piper_lerobot(cfg, episodes, obs_keys):
     """Piper task 전용 저장 - robomimic HDF5(write_intervention_hdf5) 대신 LeRobotDataset
     (연구실 표준 포맷 - 2026-07-26 사용자 결정). obs_keys는 이미 collect_episode()가
@@ -276,18 +232,21 @@ def main(cfg: DictConfig):
     cycler = None
     render_fn = None
     if _is_piper_task(cfg):
-        from mani_sim.runners.piper_intervention import PiperKeyboardIntervention
+        from mani_sim.runners.piper import make_camera_toggle_fn, make_piper_intervention
 
-        intervention = PiperKeyboardIntervention(control_fps=cfg.control_fps)
+        intervention = make_piper_intervention(cfg)
+        # 카메라 라이브 프리뷰는 안 띄운다 - cv2 창이 MuJoCo GL 컨텍스트와 같이 뜨면 이 PC에서
+        # 멈추는 기존 지뢰(eval.py에 2026-07-20 기록됨)를 그대로 재현함(2026-07-26 실측 재확인).
+        # mujoco 온스크린 뷰어(아래)가 실시간 시각 피드백을 이미 주므로 카메라는 저장만 한다.
         if cfg.render:
-            _attach_piper_mujoco_viewer(env)
-            render_fn = _make_piper_render_fn()
+            env.attach_viewer()
+            render_fn = make_camera_toggle_fn(env, intervention)
     elif cfg.intervention_device == "pico":
         from mani_sim.runners.pico_intervention import PICOIntervention
 
         intervention = PICOIntervention(
             env.env,
-            side=cfg.pico.side,
+            side_robot_index=dict(cfg.pico.side_robot_index) if cfg.pico.side_robot_index else None,
             pos_scale=cfg.pico.pos_scale,
             rot_scale=cfg.pico.rot_scale,
             gripper_sign=cfg.pico.gripper_sign,
@@ -310,11 +269,12 @@ def main(cfg: DictConfig):
 
             cycler = CameraCycler(env)
             prev_a = [False]
-            # image task면 손목뷰(robot0_eye_in_hand_image)를 별도 cv2 창으로 동시에 띄운다 -
-            # 사람이 조작하면서 "정책이 실제로 볼 화면"을 실시간으로 같이 확인할 수 있게
-            # (2026-07-18 요청: 제3자뷰 + 손목뷰 동시 표시, 제3자뷰는 기존처럼 A로 시점전환).
+            # image task면 손목뷰(robot0_eye_in_hand_image)를 별도 cv2 창으로 동시에 띄우려
+            # 했었는데(2026-07-18 요청) - cv2 라이브 창이 MuJoCo GL 컨텍스트와 같이 뜨면 이 PC
+            # 에서 멈추고 SIGINT도 안 먹히는 지뢰(eval.py에 2026-07-20 기록, 2026-07-26 Transport
+            # PICO 개입 테스트 중 재확인 - collect.py도 처음 밟은 것) - 고쳐질 때까지 꺼둔다.
             wrist_key = "robot0_eye_in_hand_image"
-            show_wrist = is_image_task(cfg.task) and wrist_key in cfg.task.rgb_keys
+            show_wrist = False
             if show_wrist:
                 import cv2
 
@@ -349,8 +309,9 @@ def main(cfg: DictConfig):
         )
 
     episodes = []
+    i = 0
     try:
-        for i in range(cfg.num_episodes):
+        while i < cfg.num_episodes:
             intervention.reset()
             if policy_kind == "robomimic":
                 policy.start_episode()  # 매 에피소드 RNN 은닉상태 리셋
@@ -374,21 +335,31 @@ def main(cfg: DictConfig):
                 control_fps=cfg.control_fps,
                 predict_fn=predict_fn,
             )
-            modes = ep["action_modes"]
-            print(
-                f"ep {i}: {len(modes)} frames · "
-                f"intv={int((modes == LABEL_INTV).sum())} "
-                f"preintv={int((modes == LABEL_PREINTV).sum())} "
-                f"success={ep['success']}"
-            )
-            episodes.append(ep)
+            # should_rerecord/should_stop은 PiperXRIntervention 전용(lerobot 관례: 스틱
+            # 왼쪽=다시 녹화, end_button=세션 전체 중단, 2026-07-26) - 없는 기기는 getattr
+            # 기본값으로 기존 동작(항상 저장하고 계속 진행) 그대로 유지.
+            if getattr(intervention, "should_rerecord", lambda: False)():
+                print(f"ep {i}: 다시 녹화 요청 - 버리고 재시도")
+            else:
+                modes = ep["action_modes"]
+                print(
+                    f"ep {i}: {len(modes)} frames · "
+                    f"intv={int((modes == LABEL_INTV).sum())} "
+                    f"preintv={int((modes == LABEL_PREINTV).sum())} "
+                    f"success={ep['success']}"
+                )
+                episodes.append(ep)
+                i += 1
             if cycler is not None and not cycler.is_running():
                 print("뷰어 창이 닫혀 수집을 종료합니다.")
                 break
+            if getattr(intervention, "should_stop", lambda: False)():
+                print("세션 종료 요청 - 남은 에피소드는 건너뜁니다.")
+                break
     finally:
         intervention.close()
-        if _is_piper_task(cfg) and env._env.viewer is not None:
-            env._env.viewer.close()
+        if _is_piper_task(cfg):
+            env.close_viewer()
         try:
             import cv2
 
@@ -396,11 +367,14 @@ def main(cfg: DictConfig):
         except Exception:
             pass
 
-    if _is_piper_task(cfg):
+    if not cfg.save:
+        print(f"save=false - 저장 생략(정책+개입 동작 확인용) | 총 에피소드: {len(episodes)}")
+    elif _is_piper_task(cfg):
         out = _write_piper_lerobot(cfg, episodes, obs_keys)
+        print("저장:", out, "| 총 에피소드:", len(episodes))
     else:
         out = write_intervention_hdf5(cfg.output_path, episodes, obs_keys)
-    print("저장:", out, "| 총 에피소드:", len(episodes))
+        print("저장:", out, "| 총 에피소드:", len(episodes))
 
 
 if __name__ == "__main__":

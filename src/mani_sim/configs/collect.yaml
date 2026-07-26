@@ -22,6 +22,8 @@ checkpoint_path: null
 
 num_episodes: 5
 max_steps: null            # null=상한 없음. 성공/env done/종료키까지 진행 (배포 수집 기본)
+save: true                 # false면 마지막 저장 단계를 건너뜀 - 정책+개입이 제대로 도는지만
+                            # 확인해볼 때(예: round.py로 실제 배포 라운드 돌리기 전 사전 점검).
 preintv_length: 15
 control_fps: 20            # 실시간 페이싱(Hz). 사람이 보고 개입할 시간 확보 (env 제어주기·PICO 필터 rate와 맞춤)
 render: true               # 사람이 보고 개입하려면 true (화면 필요)
@@ -41,8 +43,12 @@ toggle_key: ctrl           # 개입 on/off 토글키. "ctrl"=좌·우 Ctrl 모�
 
 # PICO VR 개입용 (device=pico일 때만 사용). xrobotoolkit_sdk + PICO 연결 필요.
 pico:
-  side: right              # 조작에 쓸 컨트롤러: right | left
-  toggle_button: B         # 개입 on/off 버튼
+  # 어느 손이 어느 로봇 슬롯을 모는지: {left: 0, right: 1} 처럼. null이면 자동 -
+  # 단일팔 task(action_dim=7)는 오른손 하나만, 양팔 task는 실측 확인된 매핑
+  # (left->0, right->1, 2026-07-26 TwoArmTransport 기준 - 다른 task면 override).
+  # 정책과 섞어 몰기(담당 안 하는 팔은 정책이 계속 몲)는 아직 미지원 - 안 잡은 손은 정지.
+  side_robot_index: null
+  toggle_button: B         # 개입 on/off 버튼(양손 공용)
   end_button: Y            # 에피소드 종료 버튼
   grip_threshold: 0.9      # 클러치 판정 임계 (grip 아날로그 > 이 값이면 팔 이동)
   # --- 실기 보정 노브 (아래 3개는 하드웨어에서 맞춰야 함) ---
