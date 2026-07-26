@@ -98,6 +98,8 @@ def _write_piper_lerobot(cfg, episodes, obs_keys):
     front_image/wrist_image/state 형태로 모아뒀으니 observation.images.<cam>/
     observation.state로 이름만 맞춰 옮긴다. finalize() 필수(실측 확인: 안 하면
     meta/episodes/*.parquet가 안 써져 다시 못 읽음, 2026-07-26 실측으로 발견한 버그)."""
+    import os
+
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     camera_keys = [k[: -len("_image")] for k in obs_keys if k.endswith("_image")]
@@ -106,20 +108,26 @@ def _write_piper_lerobot(cfg, episodes, obs_keys):
     # PiperMujocoEnv(robot_mode=single) 규약: [joint1..6, gripper] - state_feature_names() 참고.
     joint_names = [f"joint{i}.pos" for i in range(1, 7)] + ["gripper.pos"]
 
-    features = {
-        "action": {"dtype": "float32", "shape": (action_dim,), "names": joint_names},
-        "observation.state": {"dtype": "float32", "shape": (action_dim,), "names": joint_names},
-    }
-    for key in camera_keys:
-        sample_shape = episodes[0]["obs"][0][f"{key}_image"].shape if episodes else (84, 84, 3)
-        features[f"observation.images.{key}"] = {
-            "dtype": "video", "shape": tuple(sample_shape), "names": ["height", "width", "channels"],
+    # 실측 확인(2026-07-26): output_root가 이미 있으면 create()는 exist_ok=False라
+    # FileExistsError로 죽는다 - 같은 task로 여러 번 나눠 수집하는 게 정상 워크플로우라
+    # (하루에 다 못 모음, round.py처럼 누적) 기존 데이터셋이면 resume()으로 이어서 추가한다.
+    if os.path.isdir(cfg.output_root) and os.path.exists(os.path.join(cfg.output_root, "meta", "info.json")):
+        dataset = LeRobotDataset.resume(repo_id=cfg.repo_id, root=cfg.output_root)
+        logger.info(f"기존 데이터셋에 이어서 저장: {cfg.output_root}(기존 {dataset.num_episodes}개 에피소드)")
+    else:
+        features = {
+            "action": {"dtype": "float32", "shape": (action_dim,), "names": joint_names},
+            "observation.state": {"dtype": "float32", "shape": (action_dim,), "names": joint_names},
         }
-
-    dataset = LeRobotDataset.create(
-        repo_id=cfg.repo_id, fps=cfg.control_fps, root=cfg.output_root,
-        robot_type="piper_single_mujoco", features=features, use_videos=True,
-    )
+        for key in camera_keys:
+            sample_shape = episodes[0]["obs"][0][f"{key}_image"].shape if episodes else (84, 84, 3)
+            features[f"observation.images.{key}"] = {
+                "dtype": "video", "shape": tuple(sample_shape), "names": ["height", "width", "channels"],
+            }
+        dataset = LeRobotDataset.create(
+            repo_id=cfg.repo_id, fps=cfg.control_fps, root=cfg.output_root,
+            robot_type="piper_single_mujoco", features=features, use_videos=True,
+        )
     try:
         for ep in episodes:
             for t in range(len(ep["actions"])):
