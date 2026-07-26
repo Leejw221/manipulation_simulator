@@ -27,6 +27,8 @@ task) / 키보드+Placo IK(Piper task, env_backend=piper_mujoco로 task.yaml이 
 (parquet+video) - 학습 시 convert_lerobot_to_zarr.py로 zarr 변환 필요.
 """
 
+import logging
+
 import hydra
 import numpy as np
 import torch
@@ -39,6 +41,8 @@ from mani_sim.factory import registry
 from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
 from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_lowdim_keys, task_obs_keys
 
+logger = logging.getLogger(__name__)
+
 
 def _is_piper_task(cfg):
     return is_piper_task(cfg.task)
@@ -49,10 +53,22 @@ def _attach_piper_mujoco_viewer(env):
     PiperMujocoEnv.apply_action()이 매 스텝 알아서 self._sync_viewer()를 호출하므로
     (원본 코드, 손 안 댐) env._env.viewer에 핸들만 꽂아두면 그 뒤론 자동 갱신된다.
     아래 rerun(카메라+joint 대시보드)과 별개 용도라 둘 다 띄운다(2026-07-26, 사용자 요청 -
-    rerun만으로는 "eval 때 보던 자유 시점 3D 뷰"가 없어서 부족하다는 피드백)."""
+    rerun만으로는 "eval 때 보던 자유 시점 3D 뷰"가 없어서 부족하다는 피드백).
+
+    ⚠ 실측 확인(2026-07-26, 실제 랩 PC "moai-pobi"): 이 GLFW 창 생성이 이 머신에서 GLX
+    에러로 실패함(개발 중 의심했던 "원격 샌드박스라 그럴 것"이라는 추정이 틀렸음 - 실제
+    PC에서도 동일 에러, 근본 원인은 머신 전체의 GLX 드라이버 문제로 보임). rerun(Vulkan)은
+    같은 머신에서 정상 동작 확인됨. 그래서 실패해도 전체 수집이 죽지 않게 try/except로
+    감싸고 경고만 남긴다 - 고쳐질 때까지 rerun만으로 시각화."""
     import mujoco.viewer
 
-    env._env.viewer = mujoco.viewer.launch_passive(env._env.model, env._env.data)
+    try:
+        env._env.viewer = mujoco.viewer.launch_passive(env._env.model, env._env.data)
+    except Exception as e:
+        logger.warning(
+            f"mujoco 온스크린 뷰어 생성 실패({type(e).__name__}: {e}) - GLX 드라이버 문제로 "
+            "추정됨(실측: moai-pobi에서도 재현). rerun 시각화만으로 계속 진행합니다."
+        )
 
 
 def _make_piper_render_fn():
