@@ -53,6 +53,11 @@ train:
   # 그래디언트 폭주 후 sigmoid가 영구 포화됨 - 2026-07-27 밤 실측, train.yaml lr 주석 참고).
   # null이면 override 안 하고 train.yaml 기본값을 그대로 씀(=sirius 조건에 영향 없음).
   apo_lr: 1.0e-6
+  # system_kind=apo 전용 - LoRA 없이 전체 파라미터로 KTO 학습할 때 필요한 안정화 장치
+  # 둘(Diffusion-KTO 공식 코드 non-LoRA 경로 값 그대로, 2026-07-28 발견 - APO 원문은 항상
+  # LoRA를 써서 이 상황 자체가 없어 참고 불가). null이면 train.yaml 기본값 그대로.
+  apo_weight_decay: 1.0e-2
+  apo_max_grad_norm: 1.0
 
 # 매 라운드 eval(새 체크포인트 성공률 측정, 헤드리스) 설정.
 eval:

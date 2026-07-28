@@ -18,7 +18,16 @@ lr: 1.0e-4              # system.kind=apo일 땐 이 값이 안 맞음(2026-07-2
                          # 다시 안 살아남). Diffusion-KTO 논문(arXiv:2404.04465 Appendix A.1)도
                          # 1e-7(+warmup 1000step)을 씀 - system.kind=apo일 땐 round.yaml의
                          # train.apo_lr(예: 1e-6)로 명시적으로 낮춰서 override할 것.
-weight_decay: 1.0e-6
+weight_decay: 1.0e-6     # system.kind=apo일 땐 이 값도 작음(2026-07-28 발견, 원문 대조) -
+                         # Diffusion-KTO 공식 코드(non-LoRA 경로)는 1e-2를 씀. LoRA로 대부분의
+                         # 가중치를 얼려두는 APO 원문은 weight_decay 자체가 없음(순수 Adam,
+                         # 인자 미지정) - "LoRA 없이 전체 파라미터 학습"이라는 우리 상황엔 참고할
+                         # 원문이 Diffusion-KTO뿐이라 그 값을 따름. round.yaml의 train.apo_weight_decay로
+                         # override할 것.
+max_grad_norm: 1.0e9     # 사실상 클리핑 없음(측정만) - plain/SIRIUS 학습엔 지금까지 문제 없었음.
+                         # system.kind=apo일 땐 Diffusion-KTO 공식 코드가 매 스텝 1.0으로 클리핑함
+                         # (우리는 여태 이걸 안 걸어서 grad_norm이 300+까지 튀는 걸 그대로 통과시켰음,
+                         # 2026-07-28 발견) - round.yaml의 train.apo_max_grad_norm으로 override할 것.
 num_epochs: 300
 log_every: 50
 ckpt_every_epochs: 25

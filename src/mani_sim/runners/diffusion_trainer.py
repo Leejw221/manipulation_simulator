@@ -278,7 +278,9 @@ class DiffusionTrainer:
 
                 self.optimizer.zero_grad()
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1e9)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(), max_norm=self.cfg.get("max_grad_norm", 1e9)
+                )
                 self.optimizer.step()
                 self.lr_scheduler.step()
                 if self.system is not None:

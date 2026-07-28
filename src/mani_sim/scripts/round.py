@@ -142,6 +142,10 @@ def main(cfg: DictConfig):
             train_overrides.append(f"system.kind={cfg.train.system_kind}")
             if cfg.train.get("apo_lr", None):
                 train_overrides.append(f"lr={cfg.train.apo_lr}")
+            if cfg.train.get("apo_weight_decay", None):
+                train_overrides.append(f"weight_decay={cfg.train.apo_weight_decay}")
+            if cfg.train.get("apo_max_grad_norm", None):
+                train_overrides.append(f"max_grad_norm={cfg.train.apo_max_grad_norm}")
             if checkpoint is not None:
                 # 이 라운드를 "배포한" 체크포인트 == APO 원문의 vla_path(policy/reference가
                 # 같은 지점에서 출발). round0는 round0_checkpoint가 이미 이 역할.
