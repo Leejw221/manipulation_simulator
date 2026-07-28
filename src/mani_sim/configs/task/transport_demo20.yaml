@@ -1,0 +1,50 @@
+name: transport_demo20
+env_name: TwoArmTransport
+robots: [Panda, Panda]
+# transport.yaml과 완전히 동일 - filter_key만 추가된 전용 변형(2026-07-27, round.py용).
+# task=transport에 +task.filter_key=demo20을 CLI로 얹지 않는 이유: round.py는 task/policy만
+# 하위 프로세스(collect/train/eval)에 그대로 전달하고 개별 필드 override는 전파 안 하므로
+# (round.py 자체 docstring 경고), filter_key가 collect.py(round_size_ratio 계산)·train.py
+# 양쪽에 항상 같이 붙어 있으려면 task yaml 자체에 박아두는 게 유일하게 일관된 방법.
+# transport.yaml은 그대로 두고(eval.py 등 다른 용도에서 filter_key가 있으면 안 됨) 이 파일만
+# round.py 계열(collect/train/round)에서 task=transport_demo20으로 선택해서 쓴다.
+env_kwargs:
+  env_configuration: single-arm-opposed
+  lite_physics: false
+  controller_configs:
+    type: BASIC
+    body_parts:
+      right:
+        type: OSC_POSE
+        input_max: 1
+        input_min: -1
+        output_max: [0.05, 0.05, 0.05, 0.5, 0.5, 0.5]
+        output_min: [-0.05, -0.05, -0.05, -0.5, -0.5, -0.5]
+        kp: 150
+        damping: 1
+        impedance_mode: fixed
+        kp_limits: [0, 300]
+        damping_limits: [0, 10]
+        position_limits: null
+        orientation_limits: null
+        uncouple_pos_ori: true
+        control_delta: true
+        interpolation: null
+        ramp_ratio: 0.2
+        input_ref_frame: world
+        gripper:
+          type: GRIP
+hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
+filter_key: demo20
+camera_names: [agentview, robot0_eye_in_hand, robot1_eye_in_hand]
+image_size: 84
+rgb_keys: [agentview_image, robot0_eye_in_hand_image, robot1_eye_in_hand_image]
+lowdim_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, robot1_eef_pos, robot1_eef_quat, robot1_gripper_qpos]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 2
+  robot1_eef_pos: 3
+  robot1_eef_quat: 4
+  robot1_gripper_qpos: 2
+action_dim: 14

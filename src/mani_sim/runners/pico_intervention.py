@@ -24,7 +24,16 @@ sirius와의 핵심 차이:
   grip(클러치, 손마다 독립)  : 잡고 있는 동안만 그 손이 담당하는 팔이 움직인다. 놓으면 정지
                               → 손을 편한 위치로 옮긴 뒤 다시 잡으면 점프 없이 이어짐
   trigger(손마다 독립)       : 그리퍼 (뗀 상태=열림, 당기면 닫힘)
-  end_button(기본 Y)        : 현재 에피소드 종료
+  end_button(기본 Y)        : 현재 에피소드 종료(저장)
+  오른손 스틱 왼쪽(x<-0.8)   : 진행 중인 에피소드 폐기하고 즉시 재시도(저장 안 함).
+  오른손 스틱 오른쪽(x>0.8)  : 진행 중인 에피소드 폐기 + **직전에 이미 저장된 에피소드도
+                              목록에서 삭제**하고 재시도 - 개입을 잘못했다는 걸 한 에피소드
+                              늦게 깨달았을 때용(2026-07-27, 사용자 결정). moai_policy(실물)의
+                              "오른쪽=저장+reset mode"는 시뮬엔 reset mode 자체가 없고
+                              end_button과도 중복이라 다른 의미로 재배정함 - "왼쪽=폐기"만
+                              원래 컨벤션 그대로. collect.py가 should_rerecord()/
+                              should_delete_previous()를 보고 실제 목록 조작을 담당한다
+                              (should_rerecord는 2026-07-26 Piper용으로 만들어둔 자리).
 
 보정 노브(실기에서 맞춰야 함):
   R_headset_world : PICO 헤드셋 → 로봇 base 축 대응(3x3). robosuite Panda 프레임은
@@ -111,6 +120,7 @@ class PICOIntervention:
         euro_min_cutoff=1.0,
         euro_beta=0.01,
         euro_d_cutoff=1.0,
+        rerecord_stick_threshold=0.8,
     ):
         import xrobotoolkit_sdk as xrt
 
@@ -132,6 +142,8 @@ class PICOIntervention:
 
         self._get_toggle = getattr(xrt, f"get_{toggle_button}_button")
         self._get_end = getattr(xrt, f"get_{end_button}_button")
+        self._get_stick = xrt.get_right_axis  # 재녹화 제스처(moai_policy와 동일하게 오른손 스틱)
+        self.rerecord_stick_threshold = rerecord_stick_threshold
 
         # 위치는 부호 반전(좌우 미러) 포함 signed permutation을 허용한다(det=-1 가능).
         # 회전 벡터는 유사벡터라, 반사일 때 det 부호를 곱해 축 매핑을 일관되게 만든다.
@@ -145,8 +157,12 @@ class PICOIntervention:
 
         self.intervening = False
         self.end_requested = False
+        self.rerecord_requested = False
+        self.delete_previous_requested = False
         self._prev_toggle = False
         self._prev_end = False
+        self._prev_stick_left = False   # 엣지 감지(홀드 중 재트리거 방지)
+        self._prev_stick_right = False
 
     def _reset_clutch(self, side=None):
         """클러치(참조 pose·필터) 초기화 — 다음 grip 인게이지 때 점프 없이 재앵커.
@@ -157,12 +173,22 @@ class PICOIntervention:
     def should_end(self):
         return self.end_requested
 
+    def should_rerecord(self):
+        return self.rerecord_requested
+
+    def should_delete_previous(self):
+        return self.delete_previous_requested
+
     def reset(self):
         """에피소드 시작 시 개입/종료 상태 초기화."""
         self.intervening = False
         self.end_requested = False
+        self.rerecord_requested = False
+        self.delete_previous_requested = False
         self._prev_toggle = False
         self._prev_end = False
+        self._prev_stick_left = False
+        self._prev_stick_right = False
         self._reset_clutch()
 
     def _compute_arm_action(self, hand):
@@ -214,6 +240,25 @@ class PICOIntervention:
             self.end_requested = True
         self._prev_toggle = toggle
         self._prev_end = end
+
+        # 오른손 스틱(둘 다 진행 중인 에피소드는 저장 안 하고 즉시 종료+재시도):
+        #   왼쪽  : 그냥 재시도
+        #   오른쪽: 재시도 + 직전에 이미 저장된 에피소드도 목록에서 삭제(collect.py가 처리)
+        # moai_policy(실물)의 "오른쪽=저장+reset mode"는 시뮬엔 reset mode 자체가 없고
+        # end_button과도 중복이라 다른 의미로 재배정함(2026-07-27, 사용자 결정).
+        # 홀드 중 반복 트리거 방지를 위해 "이미 임계값을 넘어있던 상태"를 엣지로만 감지한다.
+        stick_x = float(self._get_stick()[0])
+        stick_left = stick_x < -self.rerecord_stick_threshold
+        stick_right = stick_x > self.rerecord_stick_threshold
+        if stick_left and not self._prev_stick_left:
+            self.end_requested = True
+            self.rerecord_requested = True
+        if stick_right and not self._prev_stick_right:
+            self.end_requested = True
+            self.rerecord_requested = True
+            self.delete_previous_requested = True
+        self._prev_stick_left = stick_left
+        self._prev_stick_right = stick_right
 
         if not self.intervening:
             return None

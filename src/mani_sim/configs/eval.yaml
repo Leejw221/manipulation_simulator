@@ -15,6 +15,10 @@ num_episodes: 50
 max_steps: 300
 render: false
 device: cuda
+# render=true + image task일 때만 적용(성공률 측정용 render=false 호출은 이 값과 무관하게
+# 학습 스케줄러 그대로 - collect.yaml의 동일 이름 필드와 같은 메커니즘, runners/rollout.py의
+# maybe_speed_up_inference 참고, 2026-07-27). null이면 안 바꿈(DDPM 그대로, 끊길 수 있음).
+deploy_num_inference_steps: 10
 # 추론 결과(metrics.json)를 남길 폴더 — 학습 output_dir과 같은 컨벤션(task/policy/시각),
 # 단 eval/ 아래 시각은 "추론한 시각"(학습 시각 아님). eval.py가 직접 os.makedirs+저장한다
 # (train.yaml처럼 hydra.run.dir을 여기 맞추지 않음 — use_run_config가 hydra 부트스트랩

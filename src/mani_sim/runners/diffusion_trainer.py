@@ -8,8 +8,13 @@ resume은 `utils/checkpoints.get_latest_epoch_checkpoint`로 `policy_epoch<N>.pt
 **가중치 학습(옵션, cfg.weighting.kind)**: round.py가 배포+개입으로 모은 데이터(action_mode
 라벨 포함)로 학습할 때 SIRIUS 스타일 고정 가중치(class_based) 또는 action_error 가중치를
 켤 수 있다 — losses/sirius_loss.py(reference 모델 없는 단순 가중 손실) + weighting/*.py를
-그대로 재사용. **APO(적응형, reference 모델+KTO)는 아직 미구현** — BC/DiffusionPolicy 둘 다
-reference-context(OpenVLA만 있음)가 없어 이번 리팩터 범위에서 제외, 별도 과제로 남김.
+그대로 재사용.
+
+**system 축(옵션, cfg.system.kind, 2026-07-27)**: null(기본)이면 위 weighting 경로 그대로
+(=SIRIUS 스타일). "apo"면 reference 모델 + KTO 앵커(policies/diffusion/apo_system.py) —
+self.policy는 그대로 두고 self.system이 policy를 인자로 받아 손실만 계산해 돌려준다
+(체크포인트·optimizer가 reference를 절대 못 보게 하기 위한 설계, apo_system.py 참고).
+weighting 축과 독립이라 그대로 같이 켤 수 있다.
 
 **rabc**(2026-07-19 추가) — SARM 논문(arXiv:2509.25358)의 RA-BC를 progress-delta 가중치로
 이식(weighting/rabc.py). class_based/action_error와 인터페이스가 달라(action_mode(B,T) 대신
@@ -26,6 +31,7 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
+from mani_sim.datasets.apo_sampler import build_balanced_sampler
 from mani_sim.datasets.normalization import (
     MinMaxNormalizer, compute_minmax_stats, compute_minmax_stats_zarr, save_stats,
 )
@@ -37,7 +43,10 @@ from mani_sim.runners.rollout import rollout_policy
 from mani_sim.utils.checkpoints import (
     get_latest_epoch_checkpoint, load_resume_state, save_epoch_checkpoint, save_resume_state, save_run_config,
 )
-from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_lowdim_keys, task_obs_keys
+from mani_sim.utils.task_utils import (
+    is_image_task, is_piper_task, make_eval_env, read_all_action_modes, task_lowdim_keys, task_obs_keys,
+    uses_zarr_dataset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +59,12 @@ class DiffusionTrainer:
         self.device = device
         self.task_cfg = cfg.task
         self.is_image = is_image_task(cfg.task)
-        self.is_piper = is_piper_task(cfg.task)
+        self.is_piper = is_piper_task(cfg.task)  # 시뮬레이터 선택(make_eval_env가 내부에서 씀)
+        self.uses_zarr = uses_zarr_dataset(cfg.task)  # 학습 데이터 저장 포맷 - is_piper와 독립
         os.makedirs(cfg.output_dir, exist_ok=True)
 
         lowdim_keys = task_lowdim_keys(cfg.task)
-        if self.is_piper:
+        if self.uses_zarr:
             stats = compute_minmax_stats_zarr(cfg.task.zarr_path, lowdim_keys)
         else:
             stats = compute_minmax_stats(cfg.task.hdf5_path, lowdim_keys)
@@ -69,7 +79,7 @@ class DiffusionTrainer:
         if weighting_kind == "class_based":
             from mani_sim.weighting.class_based import ClassBasedWeight
             self.weighting = ClassBasedWeight(
-                cfg.task.hdf5_path, target_intv=weighting_cfg.target_intv,
+                read_all_action_modes(cfg.task), target_intv=weighting_cfg.target_intv,
                 target_preintv=weighting_cfg.target_preintv, device=device,
             )
             extra_keys = ("action_mode",)
@@ -110,12 +120,24 @@ class DiffusionTrainer:
         elif weighting_kind is not None:
             raise ValueError(
                 f"weighting.kind={weighting_kind!r} 미지원 "
-                "(class_based|action_error|rabc|phase_rule|action_variance|event_radius) — "
-                "APO(적응형, reference 모델 필요)는 BC/DiffusionPolicy에 아직 미구현"
+                "(class_based|action_error|rabc|phase_rule|action_variance|event_radius)"
             )
         self.weighting_kind = weighting_kind
 
-        if self.is_piper:
+        self.system = None
+        system_cfg = cfg.get("system", None)
+        system_kind = system_cfg.kind if system_cfg else None
+        if system_kind is not None:
+            init_state_dict = None
+            init_from = cfg.get("init_from", None)
+            if init_from:
+                ckpt = torch.load(init_from, map_location=device, weights_only=False)
+                init_state_dict = ckpt["model"]
+            self.system = registry.create_system(system_kind, cfg, self.policy, self.weighting, device, init_state_dict)
+            if "action_mode" not in extra_keys:
+                extra_keys = extra_keys + ("action_mode",)
+
+        if self.uses_zarr:
             self.dataset = ZarrSequenceDataset(
                 zarr_path=cfg.task.zarr_path,
                 obs_keys=task_obs_keys(cfg.task),
@@ -137,9 +159,18 @@ class DiffusionTrainer:
                 rgb_keys=cfg.task.rgb_keys if self.is_image else (),
                 hdf5_cache_mode=cache_mode,
                 extra_keys=extra_keys,
+                filter_key=cfg.task.get("filter_key", None),
             )
+        # system=apo면 균등 셔플 대신 APO 원문의 50/25/25(정상/개입/사전개입) balanced
+        # sampling을 쓴다(2026-07-27 발견 - 이 배선이 없으면 개입 비율이 낮은 라운드
+        # 데이터에서 배치 대부분이 "전부 desirable"이 되어 z0=배치평균 reward가 그
+        # 배치 자체의 chosen 평균과 같아져 KTO loss가 beta와 무관하게 상수 0.5로
+        # 죽는다 - apo_sampler.py가 2026-07-17부터 있었지만 한 번도 연결된 적 없었음).
+        sampler = None
+        if self.system is not None:
+            sampler = build_balanced_sampler(self.dataset.get_action_mode_first_frame())
         self.dataloader = DataLoader(
-            self.dataset, batch_size=cfg.batch_size, shuffle=True,
+            self.dataset, batch_size=cfg.batch_size, shuffle=(sampler is None), sampler=sampler,
             num_workers=cfg.num_workers, drop_last=True, persistent_workers=cfg.num_workers >= 1,
         )
         logger.info(f"dataset len={len(self.dataset)} cache={cache_mode} image={self.is_image}")
@@ -221,7 +252,11 @@ class DiffusionTrainer:
                     "action": raw_batch["action"].to(self.device),
                     "action_mask": raw_batch["action_mask"].to(self.device),
                 }
-                if self.weighting is not None:
+                metrics = {}
+                if self.system is not None:
+                    action_mode = raw_batch["action_mode"].to(self.device)
+                    loss, metrics = self.system.compute_loss(self.policy, batch, action_mode)
+                elif self.weighting is not None:
                     per_sample_loss = self.policy.compute_loss(batch, reduction="none")  # (B,)
                     if self.weighting_kind in ("rabc", "phase_rule", "action_variance", "event_radius"):
                         weight_b = self.weighting.compute_weights(raw_batch["demo_id"], raw_batch["index_in_demo"])
@@ -246,12 +281,17 @@ class DiffusionTrainer:
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1e9)
                 self.optimizer.step()
                 self.lr_scheduler.step()
+                if self.system is not None:
+                    self.system.update_reference_ema(self.policy, global_step)
 
                 if global_step % self.cfg.log_every == 0:
-                    logger.info(f"epoch {epoch} step {global_step} loss {loss.item():.4f} grad_norm {grad_norm:.3f}")
+                    logger.info(f"epoch {epoch} step {global_step} loss {loss.item():.4f} grad_norm {grad_norm:.3f}"
+                                + (f" {dict(metrics)}" if metrics else ""))
                     if use_wandb:
-                        wandb.log({"loss": loss.item(), "lr": self.lr_scheduler.get_last_lr()[0],
-                                   "grad_norm": float(grad_norm), "epoch": epoch}, step=global_step)
+                        log_dict = {"loss": loss.item(), "lr": self.lr_scheduler.get_last_lr()[0],
+                                    "grad_norm": float(grad_norm), "epoch": epoch}
+                        log_dict.update({f"system/{k}": v for k, v in metrics.items()})
+                        wandb.log(log_dict, step=global_step)
                 global_step += 1
 
             is_last = epoch == num_epochs - 1

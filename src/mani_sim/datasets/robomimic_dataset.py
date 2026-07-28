@@ -15,6 +15,7 @@ action의 윈도우가 같은 배열이고, 그 안에서 "관측 이력"과 "�
 Tp개=action)을 수행해 Diffusion Policy가 바로 쓸 수 있는 형태로 재구성한다.
 """
 
+import numpy as np
 import torch
 
 
@@ -84,6 +85,28 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self._seq_dataset)
 
+    def _demo_id_and_index_in_demo(self, index):
+        seq = self._seq_dataset
+        demo_id = seq._index_to_demo_id[index]
+        demo_start = seq._demo_id_to_start_indices[demo_id]
+        offset = 0 if seq.pad_frame_stack else (seq.n_frame_stack - 1)
+        return demo_id, index - demo_start + offset
+
+    def get_action_mode_first_frame(self):
+        """샘플(윈도우)별 대표 action_mode - 그 윈도우의 행동 청크가 시작하는 프레임
+        (index_in_demo)의 라벨. apo_sampler.build_balanced_sampler가 배치 구성 이전
+        (DataLoader 생성 시점)에 전체 인덱스에 대해 한 번에 필요로 해서, __getitem__을
+        인덱스마다 호출하지 않고(이미지까지 로드하는 무거운 경로) 별도로 가볍게 계산한다."""
+        seq = self._seq_dataset
+        cache = {}
+        labels = np.empty(len(seq), dtype=np.int64)
+        for index in range(len(seq)):
+            demo_id, index_in_demo = self._demo_id_and_index_in_demo(index)
+            if demo_id not in cache:
+                cache[demo_id] = seq.hdf5_file[f"data/{demo_id}/action_mode"][()]
+            labels[index] = cache[demo_id][index_in_demo]
+        return labels
+
     def __getitem__(self, index):
         raw = self._seq_dataset[index]
 
@@ -109,11 +132,7 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
         # RA-BC 등 외부 가중치가 demo 내 위치(progress lookup)를 찾을 수 있게 노출.
         # robomimic SequenceDataset이 내부적으로 계산하는 것과 동일한 정의(get_item 참고):
         # index_in_demo = 이 샘플의 obs 이력이 끝나는(=행동 청크가 시작하는) 프레임.
-        seq = self._seq_dataset
-        demo_id = seq._index_to_demo_id[index]
-        demo_start = seq._demo_id_to_start_indices[demo_id]
-        offset = 0 if seq.pad_frame_stack else (seq.n_frame_stack - 1)
-        index_in_demo = index - demo_start + offset
+        demo_id, index_in_demo = self._demo_id_and_index_in_demo(index)
 
         item = {
             "obs": obs,

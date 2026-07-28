@@ -1,8 +1,12 @@
 """통합 rollout 평가(DP: low_dim·image 공용) — outputs/final_eval.py를 대체.
-render=true면 live_rollout.py가 하던 것과 동일하게 화면에 띄운다(low_dim=mjviewer 온스크린,
-image=cv2 오프스크린 렌더 — 동시 사용 시 GL 컨텍스트 충돌로 세그폴트하므로 분기, live_rollout.py
-에 있던 지뢰 그대로 유지). OpenVLA는 predict_action_chunk가 아니라 매 스텝 단일 이미지
-재계획이라 인터페이스가 달라 policy_name=="openvla"일 때 별도 루프로 분기한다.
+render=true면 화면에 띄운다 — low_dim/image 둘 다 MuJoCo 자체 온스크린 뷰어(mjviewer)를
+쓴다(2026-07-27부터, collect.py와 동일 기법: 오프스크린 렌더 env에 `env.env.has_renderer=True`
+로 뷰어를 얹음). image task는 한때 cv2 라이브 창으로 그리려다 이 PC에서 오프스크린 GL
+컨텍스트와 충돌해 막아뒀었는데(live_rollout.py 지뢰), collect.py가 cv2 없이 실사용 검증한
+방식으로 교체해 해소함 — Piper task(env_backend=piper_mujoco)만 예외(뷰어 방식이 rerun/
+attach_viewer로 달라 여기 대상 아님, save_gif로 대체). OpenVLA는 predict_action_chunk가
+아니라 매 스텝 단일 이미지 재계획이라 인터페이스가 달라 policy_name=="openvla"일 때 별도
+루프로 분기한다.
 
 사용:
     python -m mani_sim.scripts.eval checkpoint_path=outputs/train/square_diffusion_unet/policy_epoch300.pt
@@ -25,7 +29,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from mani_sim.datasets.normalization import MinMaxNormalizer, load_stats
 from mani_sim.factory import registry
-from mani_sim.runners.rollout import rollout_policy
+from mani_sim.runners.rollout import maybe_speed_up_inference, rollout_policy
 from mani_sim.utils.checkpoints import load_run_config
 from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_obs_keys
 
@@ -96,18 +100,29 @@ def _run_dp_eval(cfg, device):
 
         extra_reset_fn = tracker.reset
 
-    if cfg.render and is_image_task(cfg.task):
-        # cv2.namedWindow가 이 PC에서 MuJoCo 오프스크린 GL 컨텍스트와 충돌해 멈춤(2026-07-20
-        # 실측 — 렌더 자체는 14ms/frame으로 빠름, cv2 창 생성 시점부터 CPU 100%로 무한 대기,
-        # SIGINT도 안 먹힘 — native 루프 추정, 원인 미해결). image task는 save_gif로 대체.
-        raise RuntimeError(
-            "render=true(cv2 라이브 창)는 이 PC에서 행 걸림(2026-07-20 확인) — 대신 "
-            "save_gif=<path>를 쓰세요(오프스크린 렌더만 사용, cv2 창 없음)."
-        )
-
     on_episode_step = None
     gif_frames = None
-    if cfg.save_gif and is_image_task(cfg.task):
+    if cfg.render and is_image_task(cfg.task) and not is_piper_task(cfg.task):
+        # 예전엔 cv2.namedWindow로 라이브 프리뷰를 그리려다 이 PC에서 MuJoCo 오프스크린 GL
+        # 컨텍스트와 충돌해 멈췄음(2026-07-20 실측, cv2 창 생성 시점부터 CPU 100% 무한
+        # 대기·SIGINT도 안 먹힘, 원인 미해결) — 그래서 그동안 image+render는 아예 막고
+        # save_gif로만 우회했음. collect.py가 cv2 대신 MuJoCo 자체 온스크린 뷰어(mjviewer)를
+        # 오프스크린 렌더 env에 그대로 얹는 방식으로 이 조합을 실사용(PICO 배포, 수십
+        # 에피소드) 검증했으니 여기도 같은 기법을 쓴다(2026-07-27) — 온/오프스크린 둘 다
+        # MuJoCo 자체 렌더링 스택이라 서로 다른 GUI 라이브러리 간 충돌이 없다.
+        env = make_eval_env(cfg.task)
+        env.env.has_renderer = True
+        env.env.renderer = "mjviewer"
+        # on_episode_step의 sleep은 화면 페이싱일 뿐 - 실제 끊김은 rollout_policy() 내부의
+        # 동기 청크 계산(DDPM 100-step, ~500ms/청크) 때문이라 여기서 정책 자체를 가속해야
+        # 한다(collect.py의 배포 가속과 동일 함수, 2026-07-27). 학습/성공률 측정(render=false
+        # 호출)은 이 분기 자체를 안 타므로 전혀 영향 없음.
+        maybe_speed_up_inference(policy, cfg.get("deploy_num_inference_steps", None))
+
+        def on_episode_step(env_, ep, step):
+            env_.render()
+            time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
+    elif cfg.save_gif and is_image_task(cfg.task):
         env = make_eval_env(cfg.task)
         gif_frames = []
         # Piper task는 3인칭 카메라 이름이 다르다(camera_names.front="front_cam" vs
@@ -120,7 +135,7 @@ def _run_dp_eval(cfg, device):
                 from PIL import Image
                 gif_frames.append(Image.fromarray(frame))
     elif cfg.render:
-        # low_dim: MuJoCo 네이티브 mjviewer(온스크린). (image+render는 위에서 이미 막힘)
+        # low_dim: MuJoCo 네이티브 mjviewer(온스크린).
         env = make_eval_env(cfg.task, render=True)
 
         def on_episode_step(env_, ep, step):
@@ -138,6 +153,7 @@ def _run_dp_eval(cfg, device):
         action_horizon=cfg.policy.action_horizon, max_steps=cfg.max_steps, num_episodes=cfg.num_episodes,
         device=device, rgb_keys=cfg.task.rgb_keys if is_image_task(cfg.task) else (),
         extra_obs_fn=extra_obs_fn, extra_obs_reset_fn=extra_reset_fn, on_episode_step=on_episode_step,
+        verbose=True,
     )
     if gif_frames:
         gif_frames[0].save(cfg.save_gif, save_all=True, append_images=gif_frames[1:],
@@ -228,8 +244,21 @@ def main(cfg: DictConfig):
     print(metrics)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
+    # episodes(에피소드별 success/steps, rollout_policy의 verbose=True와 짝 - 2026-07-27)는
+    # metrics.json엔 안 넣는다 - 그 파일은 원래 집계(success_rate 등)만 담는 관례라, 대신
+    # episodes.csv로 따로 저장해 나중에 화면 안 보고도 통계/에피소드별 리뷰가 가능하게 한다.
+    episodes = metrics.pop("episodes", None)
     with open(os.path.join(cfg.output_dir, "metrics.json"), "w") as f:
         json.dump({"checkpoint_path": cfg.checkpoint_path, **metrics}, f, indent=2)
+    if episodes:
+        import csv
+
+        episodes_path = os.path.join(cfg.output_dir, "episodes.csv")
+        with open(episodes_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["episode", "success", "steps"])
+            writer.writeheader()
+            writer.writerows(episodes)
+        logger.info(f"에피소드별 기록 저장: {episodes_path} ({len(episodes)}개)")
     return metrics
 
 

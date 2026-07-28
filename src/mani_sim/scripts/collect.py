@@ -34,11 +34,12 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from mani_sim.datasets.intervention_writer import write_intervention_hdf5
+from mani_sim.datasets.intervention_writer import read_env_args, write_intervention_hdf5
 from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
 from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats
 from mani_sim.factory import registry
 from mani_sim.runners.intervention_rollout import KeyboardIntervention, collect_episode
+from mani_sim.runners.rollout import maybe_speed_up_inference
 from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_lowdim_keys, task_obs_keys
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,26 @@ logger = logging.getLogger(__name__)
 
 def _is_piper_task(cfg):
     return is_piper_task(cfg.task)
+
+
+def _demo_frame_count(cfg):
+    """round_size_ratio 계산용 — 현재 task(task.filter_key가 있으면 그 부분집합)의 총
+    프레임 수. moai_policy(실물 Piper) rollout_intervention.py의 동일 계산과 같은 개념."""
+    if _is_piper_task(cfg):
+        import zarr
+
+        z = zarr.open(cfg.task.zarr_path, mode="r")
+        return int(z["data"]["action"].shape[0])
+
+    import h5py
+
+    with h5py.File(cfg.task.hdf5_path, "r") as f:
+        filter_key = cfg.task.get("filter_key", None)
+        demo_names = (
+            [d.decode() if isinstance(d, bytes) else d for d in f["mask"][filter_key][:]]
+            if filter_key else list(f["data"].keys())
+        )
+        return sum(f["data"][d]["actions"].shape[0] for d in demo_names)
 
 
 def _write_piper_lerobot(cfg, episodes, obs_keys):
@@ -144,6 +165,8 @@ def _build_policy_predict_fn(cfg, device, action_horizon):
         print("loaded checkpoint:", cfg.checkpoint_path)
     else:
         print("no checkpoint — 무작위 초기화 정책 (조작/저장 경로 테스트용)")
+
+    maybe_speed_up_inference(policy, cfg.get("deploy_num_inference_steps", None))
 
     obs_keys = task_obs_keys(cfg.task)
     rgb_keys = cfg.task.rgb_keys if is_image_task(cfg.task) else ()
@@ -308,6 +331,18 @@ def main(cfg: DictConfig):
             "Enter=에피소드 종료 (max_steps 없이 성공/종료까지 진행)"
         )
 
+    round_frame_threshold = None
+    total_round_frames = 0
+    total_intv_frames = 0
+    if cfg.get("round_size_ratio", None):
+        demo_frame_count = _demo_frame_count(cfg)
+        round_frame_threshold = int(demo_frame_count * cfg.round_size_ratio)
+        demo_ratio = 1.0 / (1.0 + cfg.round_size_ratio)
+        print(
+            f"[라운드 목표] {round_frame_threshold} 프레임 "
+            f"({cfg.round_size_ratio}x {demo_frame_count} demo 프레임 -> 합친 데이터셋 demo 비율 {demo_ratio:.0%})"
+        )
+
     episodes = []
     i = 0
     try:
@@ -334,7 +369,27 @@ def main(cfg: DictConfig):
                 render_fn=render_fn,
                 control_fps=cfg.control_fps,
                 predict_fn=predict_fn,
+                # robomimic은 이미 매 스텝(action_horizon=1) 재계획이라 비동기 추론이 의미
+                # 없음 - cfg.async_infer와 무관하게 항상 끔.
+                async_infer=cfg.get("async_infer", False) and policy_kind != "robomimic",
+                merger_name=cfg.get("merger_name", "overwrite"),
+                te_coeff=cfg.get("te_coeff", 0.01),
             )
+            # should_delete_previous: 직전에 이미 저장된 에피소드까지 취소(PICOIntervention
+            # 오른손 스틱 오른쪽, 2026-07-27) - 목록에서 pop하고 라운드 누적값도 되돌린다.
+            # 없는 기기는 getattr 기본값으로 무시(기존 동작 유지).
+            if getattr(intervention, "should_delete_previous", lambda: False)():
+                if episodes:
+                    removed = episodes.pop()
+                    i -= 1
+                    if round_frame_threshold is not None:
+                        removed_modes = removed["action_modes"]
+                        total_round_frames -= len(removed_modes)
+                        total_intv_frames -= int((removed_modes == LABEL_INTV).sum())
+                    print(f"ep {i}: 직전 저장 에피소드 삭제 요청 - 목록에서 제거")
+                else:
+                    print("삭제할 이전 에피소드가 없음(아직 저장된 게 없음)")
+
             # should_rerecord/should_stop은 PiperXRIntervention 전용(lerobot 관례: 스틱
             # 왼쪽=다시 녹화, end_button=세션 전체 중단, 2026-07-26) - 없는 기기는 getattr
             # 기본값으로 기존 동작(항상 저장하고 계속 진행) 그대로 유지.
@@ -350,6 +405,16 @@ def main(cfg: DictConfig):
                 )
                 episodes.append(ep)
                 i += 1
+                if round_frame_threshold is not None:
+                    total_round_frames += len(modes)
+                    total_intv_frames += int((modes == LABEL_INTV).sum())
+                    print(
+                        f"  라운드 누적: {total_round_frames}/{round_frame_threshold} 프레임 "
+                        f"(intv 누적 {total_intv_frames})"
+                    )
+                    if total_round_frames >= round_frame_threshold:
+                        print(f"[라운드 종료] 목표 프레임 달성 ({total_round_frames} >= {round_frame_threshold})")
+                        break
             if cycler is not None and not cycler.is_running():
                 print("뷰어 창이 닫혀 수집을 종료합니다.")
                 break
@@ -373,7 +438,7 @@ def main(cfg: DictConfig):
         out = _write_piper_lerobot(cfg, episodes, obs_keys)
         print("저장:", out, "| 총 에피소드:", len(episodes))
     else:
-        out = write_intervention_hdf5(cfg.output_path, episodes, obs_keys)
+        out = write_intervention_hdf5(cfg.output_path, episodes, obs_keys, read_env_args(cfg.task.hdf5_path))
         print("저장:", out, "| 총 에피소드:", len(episodes))
 
 

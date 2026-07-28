@@ -47,6 +47,17 @@ class ZarrSequenceDataset(torch.utils.data.Dataset):
         for demo_id, (start, end) in enumerate(zip(self._episode_starts, self._episode_ends)):
             self._index.extend((demo_id, t) for t in range(end - start))
 
+    def get_action_mode_first_frame(self):
+        """샘플(윈도우)별 대표 action_mode - robomimic_dataset.RobomimicSequenceDataset.
+        get_action_mode_first_frame과 동일 계약(그 윈도우의 행동 청크가 시작하는 프레임의
+        라벨). apo_sampler.build_balanced_sampler가 배치 구성 이전에 전체 인덱스에 대해
+        한 번에 필요로 한다(2026-07-27 밤)."""
+        action_mode = self._buffer.data["action_mode"][:]
+        global_positions = np.array(
+            [int(self._episode_starts[demo_id]) + t for demo_id, t in self._index]
+        )
+        return action_mode[global_positions]
+
     def __len__(self):
         return len(self._index)
 

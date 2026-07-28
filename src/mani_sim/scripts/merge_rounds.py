@@ -17,10 +17,16 @@ import h5py
 def merge_rounds(output_path, input_paths):
     total = 0
     demo_idx = 0
+    env_args = None
     with h5py.File(output_path, "w") as fout:
         data_out = fout.create_group("data")
         for path in input_paths:
             with h5py.File(path, "r") as fin:
+                if env_args is None:
+                    # derive_task_meta_from_hdf5가 학습 시 필수로 읽음 - 입력 전부 같은
+                    # task에서 나왔으므로(같은 env_name/env_kwargs) 첫 입력 값을 그대로 승계
+                    # (2026-07-27 발견: 이게 빠져서 병합 파일로 학습하면 KeyError).
+                    env_args = fin["data"].attrs["env_args"]
                 demo_keys = sorted(
                     fin["data"].keys(), key=lambda k: int(k.split("_")[1])
                 )
@@ -30,6 +36,7 @@ def merge_rounds(output_path, input_paths):
                     demo_idx += 1
             print(f"{path}: {len(demo_keys)} demo 병합 (누적 {demo_idx})")
         data_out.attrs["total"] = total
+        data_out.attrs["env_args"] = env_args
     print(f"저장: {output_path} | 총 {demo_idx} demo, {total} frame")
     return output_path
 

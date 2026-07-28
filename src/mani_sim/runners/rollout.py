@@ -17,6 +17,40 @@ import numpy as np
 import torch
 
 
+def maybe_speed_up_inference(policy, deploy_num_inference_steps):
+    """실시간/라이브 뷰어용 추론 가속(원래 collect.py 전용이었다가 2026-07-27 공용으로 이동
+    - eval.py의 render=true 뷰어도 옛날 rollout_policy()의 동기 청크 계산(DDPM 100-step,
+    청크당 ~500ms) 그대로라 collect.py가 겪었던 것과 똑같이 끊겨서 여기로 옮겨 재사용).
+    학습/성공률 측정용 호출(diffusion_trainer.py의 주기 eval, rq1_weight_vs_success.py 등,
+    전부 deploy_num_inference_steps 인자 자체를 안 넘김)은 전혀 안 건드림 - 호출부가 명시적으로
+    값을 넘길 때만(collect.py의 배포, eval.py의 render=true) 적용되는 opt-in.
+
+    이미 학습된 noise-prediction 네트워크(가중치)는 그대로 두고 **추론 시점 스케줄러만**
+    DDIM으로 바꿔치기한다(DDIM은 DDPM으로 학습된 모델에 재학습 없이 그대로 적용 가능한 결정론적
+    샘플러 - low_dim 정책이 이미 이 조합을 기본으로 씀). deploy_num_inference_steps=None이면
+    아무 것도 안 바꿈(기존 동작 그대로).
+
+    실측 배경: Transport 이미지 정책(DDPM 100-step)의 청크 계산이 평균 513ms 걸려 pred_horizon
+    (16스텝) x control_fps(20Hz) 예산인 800ms의 64%를 먹어치웠고, 순차 요청(비파이프라인)
+    구조라 거의 매 청크마다 merger가 바닥나 stall이 발생함(2026-07-27 실측, HANDOFF 참고)."""
+    if deploy_num_inference_steps is None or not hasattr(policy, "inference_scheduler"):
+        return
+    from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+
+    train_cfg = policy.train_scheduler.config
+    policy.inference_scheduler = DDIMScheduler(
+        num_train_timesteps=train_cfg.num_train_timesteps,
+        beta_schedule=train_cfg.beta_schedule,
+        clip_sample=True,
+        prediction_type="epsilon",
+    )
+    policy.num_inference_steps = deploy_num_inference_steps
+    print(
+        f"[추론 가속] 추론 스케줄러를 DDIM({deploy_num_inference_steps} step)으로 교체 "
+        f"(학습 가중치·성공률 평가용 DDPM {train_cfg.num_train_timesteps}-step은 그대로)"
+    )
+
+
 def _to_chw01(img):
     """(H,W,C) uint8 또는 float → (C,H,W) float[0,1]. rgb 키 전용."""
     img = np.asarray(img)
@@ -51,7 +85,7 @@ def _build_obs_batch(obs_history, obs_keys, rgb_keys, normalizer, device, extra_
 def rollout_policy(
     env, policy, normalizer, obs_keys, obs_horizon, action_horizon, max_steps, num_episodes, device,
     rgb_keys=(), extra_obs_fn=None, extra_obs_reset_fn=None, on_episode_step=None,
-    save_trajectory_keys=None,
+    save_trajectory_keys=None, verbose=False,
 ):
     """extra_obs_fn: 합성 obs 키 계산 콜백(예: stage_onehot). extra_obs_reset_fn: 에피소드
     시작마다 그 콜백의 내부 상태를 초기화(예: OnlineStageTracker.reset()). on_episode_step:
@@ -59,9 +93,16 @@ def rollout_policy(
 
     save_trajectory_keys: None이면 기존과 동일(집계만 반환). 키 목록(예: ["object",
     "robot0_gripper_qpos","robot1_gripper_qpos"])을 주면 에피소드별 (T, ...) 배열로 저장해
-    반환 dict의 "trajectories"에 담는다 — RQ1(지표-성공률 상관) 분석용, 학습에는 안 씀."""
+    반환 dict의 "trajectories"에 담는다 — RQ1(지표-성공률 상관) 분석용, 학습에는 안 씀.
+
+    verbose=True면 에피소드가 끝날 때마다 `ep {i}: steps=... success=...`를 즉시 출력한다
+    (2026-07-27 추가 - eval.py에서 render=true로 여러 에피소드를 눈으로 지켜볼 때, 화면만
+    보고 일일이 세지 않아도 되게). 기본 False라 diffusion_trainer.py의 학습 중 주기 평가·
+    rq1_weight_vs_success.py 등 기존 호출부는 로그가 안 늘어남. 에피소드별 success/steps는
+    verbose와 무관하게 항상 가볍게(트래젝토리 전체 저장 아님) `metrics["episodes"]`로 반환."""
     policy.eval()
     successes = []
+    episodes = []
     trajectories = [] if save_trajectory_keys is not None else None
 
     for ep in range(num_episodes):
@@ -104,6 +145,9 @@ def rollout_policy(
                 break
 
         successes.append(success)
+        episodes.append({"episode": ep, "success": success, "steps": step_count})
+        if verbose:
+            print(f"ep {ep}: steps={step_count} success={success}")
         if ep_log is not None:
             trajectories.append({
                 "success": success,
@@ -114,6 +158,7 @@ def rollout_policy(
         "success_rate": float(np.mean(successes)),
         "num_episodes": num_episodes,
         "num_successes": int(np.sum(successes)),
+        "episodes": episodes,
     }
     if trajectories is not None:
         metrics["trajectories"] = trajectories

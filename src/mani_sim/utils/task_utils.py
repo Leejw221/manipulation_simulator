@@ -4,6 +4,7 @@ scripts/eval.py가 공유(중복 방지)."""
 import json
 
 import h5py
+import numpy as np
 from omegaconf import OmegaConf
 
 
@@ -13,6 +14,35 @@ def is_image_task(task_cfg):
 
 def is_piper_task(task_cfg):
     return task_cfg.get("env_backend", "robosuite") == "piper_mujoco"
+
+
+def uses_zarr_dataset(task_cfg):
+    """학습 데이터를 Zarr(ReplayBuffer)에서 읽을지 여부 - is_piper_task와 독립된 축이다.
+
+    env_backend는 "시뮬레이터로 뭘 쓸지"(로봇수트 vs Piper 전용 raw MuJoCo)를 결정하고,
+    collect.py/eval.py가 이 값만 본다. 반면 이 함수는 "학습 데이터를 어느 포맷으로 읽을지"만
+    결정한다 - Piper는 시뮬레이터가 raw MuJoCo라 항상 Zarr(기존 그대로)지만, 로봇수트 task도
+    task.yaml에 dataset_backend=zarr를 명시하면 시뮬레이터(로봇수트)는 안 건드리고 학습 데이터
+    저장 포맷만 hdf5->Zarr로 바꿀 수 있다(2026-07-27 밤 - env_backend 하나가 이 둘을 같이
+    결정하던 결합을 풀기 위해 추가. scripts/convert_hdf5_to_zarr.py로 변환한 파일을 씀)."""
+    return is_piper_task(task_cfg) or task_cfg.get("dataset_backend", None) == "zarr"
+
+
+def read_all_action_modes(task_cfg):
+    """전체 데이터셋의 프레임별 action_mode를 하나로 이어붙여 반환.
+
+    weighting/class_based.py(SIRIUS 4-class 고정 가중치)처럼 개별 샘플이 아니라 데이터셋
+    전체의 클래스 비율(P(demo)/P(rollout)/P(intv)/P(preintv))이 필요한 축이 쓴다.
+    uses_zarr_dataset에 따라 hdf5/zarr 중 맞는 소스에서 읽는다(2026-07-27 밤 - Zarr task
+    에서도 SIRIUS 조건이 돌아가게 하려고 추가, weighting 클래스 자체는 포맷을 몰라도 됨)."""
+    if uses_zarr_dataset(task_cfg):
+        from mani_sim.datasets.zarr_dataset import ReplayBuffer
+
+        buffer = ReplayBuffer.create_from_path(str(task_cfg.zarr_path), mode="r")
+        return np.asarray(buffer.data["action_mode"][:])
+    with h5py.File(task_cfg.hdf5_path, "r") as f:
+        modes = [np.asarray(f["data"][demo_id]["action_mode"]) for demo_id in f["data"].keys()]
+    return np.concatenate(modes)
 
 
 def task_obs_keys(task_cfg):
@@ -61,10 +91,16 @@ def derive_task_meta_from_hdf5(task_cfg):
 
 
 def derive_task_meta_from_zarr(task_cfg):
-    """derive_task_meta_from_hdf5의 zarr(비-robosuite task, 예: Piper) 버전 - env_name/
-    robots/env_kwargs는 robosuite 전용 개념이라 애초에 없음(raw MuJoCo라 env_backend
-    분기로 make_eval_env가 직접 xml_path/camera_names를 읽음). obs_dims/action_dim만
-    zarr 배열 shape에서 그대로 derive(2026-07-26)."""
+    """derive_task_meta_from_hdf5의 zarr 버전 - env_name/robots/env_kwargs는 손대지 않고
+    obs_dims/action_dim만 zarr 배열 shape에서 그대로 derive한다(2026-07-26).
+
+    Piper(raw MuJoCo, env_backend=piper_mujoco)는 애초에 env_name/robots/env_kwargs라는
+    개념이 없어서(make_eval_env가 xml_path/camera_names를 직접 읽음) 이 함수가 그 셋을
+    안 건드리는 게 자연스럽다. 로봇수트 task가 dataset_backend=zarr로 학습 데이터만
+    Zarr를 쓰는 경우(2026-07-27 밤, uses_zarr_dataset 참고)는 env_name/robots/env_kwargs가
+    task.yaml에 이미 손으로 정확히 적혀 있고(eval.py/collect.py도 원래 이 값을 그대로
+    믿고 씀 - derive_task_meta 자체를 안 부름), 굳이 hdf5처럼 데이터에서 재검증할
+    필요가 없어 이 함수 그대로 재사용해도 안전하다."""
     import sys
     from pathlib import Path
 
@@ -85,9 +121,10 @@ def derive_task_meta_from_zarr(task_cfg):
 
 
 def derive_task_meta(task_cfg):
-    """env_backend에 따라 derive_task_meta_from_hdf5/_from_zarr 중 맞는 쪽으로 분기.
+    """학습 데이터 저장 포맷(uses_zarr_dataset)에 따라 derive_task_meta_from_hdf5/_from_zarr
+    중 맞는 쪽으로 분기 - 시뮬레이터 선택(is_piper_task)과는 별개다(uses_zarr_dataset 참고).
     train.py는 이 함수 하나만 호출하면 됨(2026-07-26)."""
-    if is_piper_task(task_cfg):
+    if uses_zarr_dataset(task_cfg):
         return derive_task_meta_from_zarr(task_cfg)
     return derive_task_meta_from_hdf5(task_cfg)
 

@@ -1,0 +1,10 @@
+defaults:
+  - task: transport
+  - _self_
+
+# null이면 task.hdf5_path을 그대로 씀 - round.py 누적 파일 등 다른 hdf5를 변환하려면 지정.
+hdf5_path: null
+# 원본 hdf5의 mask 서브셋(예: demo20)만 변환하려면 지정. hdf5_path를 이미 필터링된(round0
+# 누적 등) 파일로 줬다면 null로 둔다 - 그 안엔 보통 mask 그룹 자체가 없다.
+filter_key: null
+zarr_path: ???

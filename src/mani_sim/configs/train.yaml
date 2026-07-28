@@ -11,7 +11,13 @@ runner_name: diffusion_trainer
 seed: 0
 batch_size: 64
 num_workers: 2
-lr: 1.0e-4
+lr: 1.0e-4              # system.kind=apo일 땐 이 값이 안 맞음(2026-07-27 밤 발견) - KTO류
+                         # sigmoid 손실은 일반 diffusion MSE보다 손실 곡면이 훨씬 날카로워서,
+                         # 이 LR(warmup 거쳐 1e-4까지 램프업)로는 초반 그래디언트 폭주로 sigmoid가
+                         # 영구 포화되어 버림(실측: grad_norm이 수백에서 첫 스텝 이후 0으로 죽고
+                         # 다시 안 살아남). Diffusion-KTO 논문(arXiv:2404.04465 Appendix A.1)도
+                         # 1e-7(+warmup 1000step)을 씀 - system.kind=apo일 땐 round.yaml의
+                         # train.apo_lr(예: 1e-6)로 명시적으로 낮춰서 override할 것.
 weight_decay: 1.0e-6
 num_epochs: 300
 log_every: 50
@@ -31,7 +37,7 @@ save_every: 250
 # 가중치, action_error=예측오차 기반 적응 가중치, rabc=SARM 논문(arXiv:2509.25358)의
 # Reward-Aligned BC(progress-delta 기반, task에 stage_onehot 라벨이 hdf5에 있어야 함,
 # label_stages.py로 미리 기록) — 셋 다 reference 모델 없는 단순 가중 손실(losses/sirius_loss.py)
-# 로 적용. APO(reference 모델+KTO)는 BC/DiffusionPolicy에 아직 미구현.
+# 로 적용. reference 모델+KTO가 필요하면 아래 system.kind=apo를 켤 것(weighting은 그대로 재사용).
 weighting:
   kind: null  # null | class_based | action_error | rabc | phase_rule | action_variance | event_radius
   target_intv: 0.5       # class_based 전용(SIRIUS 원문 기본값)
@@ -56,6 +62,35 @@ weighting:
   variance_path: null      # action_variance 전용 — scripts/compute_action_variance.py로 만든 npz 경로
   w_min: 0.2               # action_variance 전용, 가중치 clip 하한
   w_max: 5.0               # action_variance 전용, 가중치 clip 상한
+
+# system 축(2026-07-27 추가) — loss 구조. null이면 위 weighting만으로 학습(=SIRIUS 스타일,
+# reference 모델 없음, 기존 동작 그대로). apo면 reference 모델 + KTO 앵커(losses/apo_loss.py,
+# policies/diffusion/apo_system.py) — weighting 축과 독립이라 system=apo + weighting.kind=
+# class_based 같은 조합도 가능(2026-07-16(4) 3축 독립 설계 그대로 계승).
+system:
+  kind: null  # null | apo
+  beta: 1.0               # 2026-07-27 밤 실측 스모크 테스트로 재조정(과거 1000은 Diffusion-KTO
+                           # 논문 자체 값(beta=5000, arXiv:2404.04465 Appendix A.1)과도 다른,
+                           # 근거가 약한 값이었음 - 확인 없이 옮겨적은 것으로 보임). 우리 reward는
+                           # 16스텝 MSE 차이 합산이라 스케일 자체가 다르므로, 값을 그대로 베낄 게
+                           # 아니라 실측(|beta*(reward-z0)| 중앙값 0.5~2)으로 우리 데이터에서
+                           # 직접 잡아야 함 - beta=1.0이 round0 데이터에서 이 기준을 만족했음.
+  desirable_weight: 1.0
+  undesirable_weight: 1.0
+  preference_frames: 8    # receding-horizon으로 실제 실행되는 앞 8프레임(pred_horizon=16 중)의
+                           # 평균 부호로 desirable/undesirable 판정.
+  reference_ema_momentum: 0.999  # Diffusion-KTO 공식 코드 기본값 그대로(train_kto_sd_v1.5.py,
+                                  # --reference_ema_momentum). LoRA 없이 전체 파라미터를 학습할 때
+                                  # reference를 이 momentum으로 계속 따라가게 해서(2026-07-28 추가)
+                                  # 정적 스냅샷일 때 생기던 "reference 대비 상대적으론 이기는데
+                                  # 절대적 task 능력은 무너지는" 표류를 막는다.
+  reference_ema_every: 20        # 공식 코드와 동일 - 매 20 optimizer step마다 갱신.
+
+# 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
+# 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의
+# policy/reference가 같은 vla_path에서 출발하는 것과 동일). null이면 scratch(reference도
+# 무작위 초기화 정책의 복제 — 의미는 약하지만 죽지는 않음).
+init_from: null
 
 resume: false
 # manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)을 그대로 따름 — <session>은

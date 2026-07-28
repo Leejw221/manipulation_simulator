@@ -10,9 +10,12 @@ WeightedDataset._sirius_reweight()(L967-979). [검증-원문, 2026-07-16]
 P*(demo)=P(demo)(=w_demos=1, 비가중), P*(rollout)=나머지. w_c = P*(c)/P(c).
 
 정책(policy) 종류와 무관 — action_mode 라벨만 있으면 BC/Diffusion/OpenVLA 어디든 동일하게 적용.
+
+이 클래스는 hdf5/zarr 등 저장 포맷을 전혀 모른다 - 전체 데이터셋의 action_mode 배열을
+그대로 받는다(2026-07-27 밤 - 원래 hdf5_path를 직접 열었으나, Zarr task에서도 SIRIUS 조건이
+돌아가게 하려고 파일 I/O를 utils.task_utils.read_all_action_modes로 분리).
 """
 
-import h5py
 import numpy as np
 import torch
 
@@ -22,20 +25,14 @@ from mani_sim.datasets.labels import LABEL_DEMO, LABEL_INTV, LABEL_PREINTV, LABE
 class ClassBasedWeight:
     def __init__(
         self,
-        hdf5_path,
-        action_mode_key="action_mode",
+        modes,
         target_intv=0.5,
         target_preintv=0.002,
         device=None,
     ):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        modes = []
-        with h5py.File(hdf5_path, "r") as f:
-            for demo_id in f["data"].keys():
-                modes.append(np.asarray(f["data"][demo_id][action_mode_key]))
-        modes = np.concatenate(modes)
-
+        modes = np.asarray(modes)
         ratio_demos = float(np.mean(modes == LABEL_DEMO))
         ratio_intv = float(np.mean(modes == LABEL_INTV))
         ratio_rollouts = float(np.mean(modes == LABEL_ROLLOUT))

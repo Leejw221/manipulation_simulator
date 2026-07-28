@@ -11,29 +11,54 @@ num_rounds: 3
 # round0(=최초 배포) 체크포인트 — 보통 train.py로 미리 학습해둔 base 정책(demo만으로 학습).
 # null이면 collect.py가 zero-action stub으로 시작(정책 없이 순수 개입으로만 첫 라운드를 모음).
 round0_checkpoint: null
+# round0_checkpoint를 학습시킨 그 데모 hdf5(extract_demo_subset.py 산출물 - mask 서브셋을
+# demo_0..N으로 재번호한 독립 파일). round_hdf5s를 이걸로 미리 채워서 시작해야 매 라운드
+# 누적 재학습("그 시점까지 전체")에 데모가 실제로 포함된다(2026-07-27 발견한 gap 수정 —
+# merge_rounds.py 자기 docstring의 "round0(데모)" 컨벤션과 맞춤). null이면 예전처럼 라운드
+# 수집분만 누적(데모 없는 task, 혹은 의도적으로 뺄 때).
+round0_demo_hdf5: null
 
 output_dir: outputs/round/${task.name}_${policy_name}
 
 # 매 라운드 collect(사람 개입) 설정 — collect.yaml 필드와 이름 동일.
 collect:
-  num_episodes: 5
+  num_episodes: 40  # round_size_ratio가 켜져있어도 안전 상한으로 남으니 넉넉히(round0 실측 기준)
   intervention_device: pico
   render: true
   preintv_length: 15
   control_fps: 20
+  # SIRIUS·APO 두 조건이 라운드당 같은 데이터량을 모으도록 통제(2026-07-27, collect.yaml의
+  # 동일 필드 설명 참고 — demo 비율 역산). null이면 num_episodes 상한만으로 종료.
+  round_size_ratio: null
 
 # 매 라운드 train 설정 — round0..현재까지 누적 데이터로 매번 처음부터 재학습(SIRIUS/APO 관례).
+# num_epochs/batch_size는 base policy 학습값(task#41: demo20, 134epoch, batch64)과 반드시
+# 동일하게 유지한다 - 이 두 값을 고정해두면 매 라운드 누적 데이터가 늘어난 만큼 steps_per_epoch
+# (=frames/batch_size)가 자동으로 비례해 늘어나서, "총 step 수가 그 시점까지 모은 데이터량에
+# 비례한다"는 라운드간 공정성 규칙(2026-07-27 밤 합의)이 값을 바꿀 필요 없이 그대로 성립한다.
 train:
-  num_epochs: 100
+  num_epochs: 134
   eval_every_epochs: 0
-  batch_size: 128
+  batch_size: 64
   use_wandb: false
   # null | class_based | action_error — train.yaml의 weighting.kind와 동일(SIRIUS 스타일 고정/
-  # 적응 가중치, reference 모델 없는 단순 가중 손실). APO(reference 모델+KTO)는 아직 미구현.
+  # 적응 가중치, reference 모델 없는 단순 가중 손실).
   weighting_kind: null
+  # null | apo — train.yaml의 system.kind. apo면 매 라운드 "그 라운드를 배포한 체크포인트"를
+  # train.py의 init_from으로 넘겨 policy를 warm-start하고 reference를 그 시점에서 복제한다
+  # (APO 원문 — policy/reference가 같은 직전-라운드 체크포인트에서 출발). sirius 조건(weighting_
+  # kind만 씀)은 지금처럼 매 라운드 scratch 재학습 그대로 — system_kind가 별개 옵션인 이유.
+  system_kind: null
+  # system_kind=apo일 때만 쓰는 학습률(train.yaml 기본 lr=1e-4는 KTO 손실엔 너무 커서 초반
+  # 그래디언트 폭주 후 sigmoid가 영구 포화됨 - 2026-07-27 밤 실측, train.yaml lr 주석 참고).
+  # null이면 override 안 하고 train.yaml 기본값을 그대로 씀(=sirius 조건에 영향 없음).
+  apo_lr: 1.0e-6
 
 # 매 라운드 eval(새 체크포인트 성공률 측정, 헤드리스) 설정.
 eval:
   num_episodes: 20
-  max_steps: 300
+  # base policy 200회 실측(task#41): 성공 에피소드 step이 382~780(평균 466) - 300은 거의 다
+  # 타임아웃으로 실패 처리해버림(2026-07-28 발견, round.py가 실제 eval까지 간 적이 없어서
+  # 이 값도 검증 안 된 채 방치돼 있었음). 1000으로 수정 - 같은 task#41 200회 eval에서 쓴 값.
+  max_steps: 1000
   eval_seed: 0

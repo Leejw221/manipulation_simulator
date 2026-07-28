@@ -20,10 +20,35 @@ policy_name: diffusion_lowdim  # policy_kind=diffusion일 때만 사용 — regi
 # 초기화 정책으로 시작(개입 조작·저장 경로를 먼저 테스트해보고 싶을 때 유용).
 checkpoint_path: null
 
-num_episodes: 5
+# policy_kind=diffusion 배포에만 적용(robomimic 배포는 자동 무시) - 학습된 가중치는 그대로
+# 두고 추론 시점 스케줄러만 DDIM으로 바꿔 청크 계산을 가속(재학습 불필요). null이면 학습 때
+# 정의된 스케줄러(image 정책은 DDPM 100-step, eval.py/round.py 성공률 평가와 동일 - 논문
+# 정합성 유지) 그대로. PICO 실시간 개입은 사람이 보고 반응해야 하니 이 값을 채워 빠르게 돈다.
+# 실측 근거(2026-07-27): Transport 이미지 정책 DDPM 100-step 청크 계산 평균 513ms가
+# pred_horizon(16)×control_fps(20Hz) 예산 800ms의 64%를 먹어 거의 매 청크 stall 발생 -
+# DDIM 10-step(low_dim 정책 기본값과 동일 관례)이면 예산 안에 여유 있게 들어옴.
+deploy_num_inference_steps: 10
+
+num_episodes: 5            # round_size_ratio를 쓸 때도 안전 상한으로 남으니 넉넉히 잡을 것
+# null이면 기존처럼 num_episodes만으로 종료. 값을 주면(예: 1.5) "라운드 전체 프레임
+# (정책실행+개입 합)이 demo 프레임 수 × 이 값"에 도달하는 순간 num_episodes 전에도 자동
+# 종료된다 — SIRIUS 가중치 공식이 요구하는 "합친 데이터셋에서 demo 비율 < ~50%"를 역산한
+# 값(1.5배 → demo 비율 40%, moai_policy 실물 Piper rollout_intervention.py와 동일 계산식
+# 이식, 2026-07-27). demo 프레임 수는 task.filter_key가 있으면 그 부분집합 기준.
+round_size_ratio: null
 max_steps: null            # null=상한 없음. 성공/env done/종료키까지 진행 (배포 수집 기본)
 save: true                 # false면 마지막 저장 단계를 건너뜀 - 정책+개입이 제대로 도는지만
                             # 확인해볼 때(예: round.py로 실제 배포 라운드 돌리기 전 사전 점검).
+
+# 정책 추론을 별도 스레드(PolicyServer)에서 끊김 없이 돌릴지 여부(moai_policy
+# flare/inference 이식, 2026-07-27) - diffusion 배포에서 action_horizon 스텝마다
+# 동기 블로킹(DDPM 100-step 추론, ~0.4-0.5초)이 걸려 로봇이 끊기듯 움직이던 문제 해소.
+# collect.py는 policy_kind=robomimic(이미 매 스텝 재계획이라 의미 없음)이면 이 값과
+# 무관하게 항상 꺼서 돌린다.
+async_infer: true
+merger_name: overwrite     # overwrite | temporal_ensemble(ACT 스타일 지수가중 평균 - 겹치는
+                            # chunk를 부드럽게 섞고 싶으면 이걸로, async_infer=true일 때만 의미 있음)
+te_coeff: 0.01              # merger_name=temporal_ensemble일 때만 사용(클수록 최신 chunk 비중↑)
 preintv_length: 15
 control_fps: 20            # 실시간 페이싱(Hz). 사람이 보고 개입할 시간 확보 (env 제어주기·PICO 필터 rate와 맞춤)
 render: true               # 사람이 보고 개입하려면 true (화면 필요)
