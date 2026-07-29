@@ -83,6 +83,13 @@ class DiffusionTrainer:
                 target_preintv=weighting_cfg.target_preintv, device=device,
             )
             extra_keys = ("action_mode",)
+            if cfg.get("use_wandb", False):
+                import wandb
+                w = self.weighting
+                wandb.log({
+                    "weighting/w_demo": w.w_demos, "weighting/w_rollout": w.w_rollouts,
+                    "weighting/w_intv": w.w_intvs, "weighting/w_preintv": w.w_pre_intvs,
+                }, step=0)
         elif weighting_kind == "action_error":
             from mani_sim.weighting.action_error import ActionErrorWeight
             self.weighting = ActionErrorWeight(
@@ -168,15 +175,23 @@ class DiffusionTrainer:
         # 죽는다 - apo_sampler.py가 2026-07-17부터 있었지만 한 번도 연결된 적 없었음).
         sampler = None
         if self.system is not None:
-            sampler = build_balanced_sampler(self.dataset.get_action_mode_first_frame())
+            sampler = build_balanced_sampler(
+                self.dataset.get_action_mode_first_frame(),
+                target_correct=cfg.system.sampler_target_correct,
+                target_interaction=cfg.system.sampler_target_interaction,
+                target_incorrect=cfg.system.sampler_target_incorrect,
+            )
         self.dataloader = DataLoader(
             self.dataset, batch_size=cfg.batch_size, shuffle=(sampler is None), sampler=sampler,
             num_workers=cfg.num_workers, drop_last=True, persistent_workers=cfg.num_workers >= 1,
         )
         logger.info(f"dataset len={len(self.dataset)} cache={cache_mode} image={self.is_image}")
 
+        # LoRA(system.use_lora=true)면 policy.parameters()의 대부분이 requires_grad=False —
+        # optimizer엔 학습 가능한 것만 넘긴다(LoRA 없을 때는 전부 True라 동작 그대로).
+        self.trainable_params = [p for p in self.policy.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
-            self.policy.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay,
+            self.trainable_params, lr=cfg.lr, weight_decay=cfg.weight_decay,
             betas=(0.95, 0.999), eps=1e-8,
         )
         total_steps = max(cfg.num_epochs * len(self.dataloader), 1)
@@ -264,22 +279,19 @@ class DiffusionTrainer:
                         action_mode = raw_batch["action_mode"].to(self.device)
                         weight_bt = self.weighting.compute_weights(action_mode, error=per_sample_loss.detach())
                         weight_b = weight_bt.mean(dim=1)
-                    if self.weighting_kind != "class_based":
-                        # STAIR(2606.15587) Eq.2 정규화(1/Σw)·Σw·ℓ와 동치 — sirius_loss 자체는
-                        # SIRIUS 원문 재현을 위해 안 건드리고(docstring 참고), 배치 평균이 1이
-                        # 되도록 weight만 미리 스케일링(수학적으로 동일 효과). class_based만 SIRIUS
-                        # 원문 그대로 두기 위해 제외(2026-07-22, 방식 간 실효 loss 스케일이 달라
-                        # 공정 비교가 안 된다는 지적으로 추가 — phase_rule 배치평균 1.522,
-                        # action_variance 0.922 등 방식마다 제각각이었음).
-                        weight_b = weight_b / weight_b.mean().clamp(min=1e-8)
+                    # 배치 평균이 1이 되도록 정규화(=moai_policy WeightedDiffusionPolicy의
+                    # `(loss*w).sum()/w.sum()`과 수학적으로 동치). class_based도 포함(2026-07-28
+                    # — 근거: EXP-10.md "SIRIUS loss 정규화" 절).
+                    weight_b = weight_b / weight_b.mean().clamp(min=1e-8)
                     loss = sirius_loss(per_sample_loss, weight_b)  # (B,) x (B,) -> scalar
+                    metrics["unweighted_loss"] = per_sample_loss.mean().item()
                 else:
                     loss = self.policy.compute_loss(batch)
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.policy.parameters(), max_norm=self.cfg.get("max_grad_norm", 1e9)
+                    self.trainable_params, max_norm=self.cfg.get("max_grad_norm", 1e9)
                 )
                 self.optimizer.step()
                 self.lr_scheduler.step()
@@ -298,7 +310,16 @@ class DiffusionTrainer:
 
             is_last = epoch == num_epochs - 1
             if (epoch + 1) % self.cfg.ckpt_every_epochs == 0 or is_last:
-                path = save_epoch_checkpoint(self.cfg.output_dir, epoch + 1, self.policy)
+                # LoRA면 policy_epoch*.pt는 merge된 일반 아키텍처로 저장한다(eval.py 등
+                # LoRA를 모르는 코드가 그대로 불러올 수 있게, 표준 LoRA 배포 방식). resume용
+                # state는 원본(LoRA 구조 유지, 그대로 학습 이어갈 수 있어야 함)을 그대로 쓴다.
+                save_policy = self.policy
+                if self.system is not None and getattr(self.system, "use_lora", False):
+                    import copy
+                    from mani_sim.networks.lora import merge_lora
+                    save_policy = copy.deepcopy(self.policy)
+                    merge_lora(save_policy.unet)
+                path = save_epoch_checkpoint(self.cfg.output_dir, epoch + 1, save_policy)
                 save_resume_state(self.cfg.output_dir, epoch + 1, self.policy, self.optimizer, self.lr_scheduler)
                 logger.info(f"saved checkpoint: {path} (+ resume_state.pt)")
 

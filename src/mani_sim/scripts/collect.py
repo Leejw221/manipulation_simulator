@@ -301,19 +301,11 @@ def main(cfg: DictConfig):
             if show_wrist:
                 import cv2
 
-            # 특정 지점의 정확한 world 좌표가 필요할 때(예: "여기가 목표 지점이어야 한다") -
-            # 그리퍼를 그 자리로 가져가면 1초에 한 번 eef_pos를 콘솔에 찍는다. 스크린샷으로
-            # 좌표를 추측하는 게 계속 안 맞아서 추가함(2026-07-18).
-            step_counter = [0]
-
             def render_fn(obs_raw):
                 a_btn = bool(intervention.xrt.get_A_button())
                 if a_btn and not prev_a[0]:
                     print(f"\n[시점] {cycler.cycle()}")
                 prev_a[0] = a_btn
-                step_counter[0] += 1
-                if step_counter[0] % cfg.control_fps == 0:
-                    print(f"[eef_pos] {obs_raw['robot0_eef_pos']}")
                 if show_wrist:
                     img_hwc = np.transpose(np.asarray(obs_raw[wrist_key]), (1, 2, 0))
                     img_bgr = cv2.cvtColor(

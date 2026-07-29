@@ -29,7 +29,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from mani_sim.datasets.normalization import MinMaxNormalizer, load_stats
 from mani_sim.factory import registry
-from mani_sim.runners.rollout import maybe_speed_up_inference, rollout_policy
+from mani_sim.runners.rollout import maybe_speed_up_inference, rollout_policy, rollout_policy_async
 from mani_sim.utils.checkpoints import load_run_config
 from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_env, task_obs_keys
 
@@ -77,6 +77,14 @@ def _run_dp_eval(cfg, device):
 
     stats_path = cfg.stats_path or os.path.join(os.path.dirname(cfg.checkpoint_path), "normalization_stats.json")
     normalizer = MinMaxNormalizer(load_stats(stats_path))
+
+    if cfg.render or cfg.get("async_infer", False):
+        # render(화면 표시)든 async_infer(연속 재계획)든 DDPM 100-step(청크당 ~500ms)으로는
+        # 감당이 안 돼 DDIM으로 가속해야 한다 - render는 눈으로 보기엔 너무 느려서 끊기고,
+        # async_infer는 재계획이 못 따라와 merger가 청크 뒷부분(action_horizon을 넘는 구간)
+        # 까지 억지로 쓰게 돼 오히려 성공률이 떨어진다(2026-07-28 실측: DDPM으로 async 돌리면
+        # anchor간격 8스텝·0/3, DDIM이면 anchor간격 1스텝) - collect.py 배포와 같은 이유.
+        maybe_speed_up_inference(policy, cfg.get("deploy_num_inference_steps", None))
 
     extra_obs_fn = extra_reset_fn = None
     if cfg.task.get("use_online_stage_tracker", False):
@@ -146,15 +154,38 @@ def _run_dp_eval(cfg, device):
 
     if cfg.eval_seed is not None:
         np.random.seed(cfg.eval_seed)  # env reset(너트 초기 위치) 시퀀스 고정 — 공정 비교용
+        # DDPM/DDIM 샘플링 노이즈(x_T 초기값 포함)도 torch 전역 RNG를 쓰는데 여기가 안
+        # 고정돼 있으면 같은 checkpoint+eval_seed로도 매 실행마다 policy가 다른 action을
+        # 생성함(2026-07-28 실측: render=true로 같은 checkpoint 반복 관찰 중 초반 행동이
+        # 실행마다 달라짐) — train.py/collect.py는 이미 seed 고정하는데 여기만 빠져있었음.
+        torch.manual_seed(cfg.eval_seed)
 
-    metrics = rollout_policy(
-        env=env, policy=policy, normalizer=normalizer,
-        obs_keys=task_obs_keys(cfg.task), obs_horizon=cfg.policy.obs_horizon,
-        action_horizon=cfg.policy.action_horizon, max_steps=cfg.max_steps, num_episodes=cfg.num_episodes,
-        device=device, rgb_keys=cfg.task.rgb_keys if is_image_task(cfg.task) else (),
-        extra_obs_fn=extra_obs_fn, extra_obs_reset_fn=extra_reset_fn, on_episode_step=on_episode_step,
-        verbose=True,
-    )
+    if cfg.get("async_infer", False):
+        # extra_obs_fn(stage tracker) 등은 async 경로 미지원 - 켜져 있으면 사람이 바로
+        # 알아채게 명시적으로 막는다(조용히 무시하지 않음).
+        if extra_obs_fn is not None:
+            raise ValueError("async_infer=true는 아직 use_online_stage_tracker와 병행 미지원.")
+        metrics = rollout_policy_async(
+            env=env, policy=policy, normalizer=normalizer,
+            obs_keys=task_obs_keys(cfg.task), obs_horizon=cfg.policy.obs_horizon,
+            action_horizon=cfg.policy.action_horizon, max_steps=cfg.max_steps, num_episodes=cfg.num_episodes,
+            device=device, rgb_keys=cfg.task.rgb_keys if is_image_task(cfg.task) else (),
+            verbose=True, merger_name=cfg.get("merger_name", "overwrite"), te_coeff=cfg.get("te_coeff", 0.01),
+            # render=true면 위 분기에서 이미 env에 mjviewer를 얹어놨다 - 여기선 collect.py와
+            # 같은 방식(collect_episode의 render=True 내부 env.render(mode="human"))으로
+            # 화면에 띄우고, control_fps로 사람이 보기 좋게 실시간 페이싱(누락돼 있었음,
+            # 2026-07-28 - render=true+async_infer=true 조합이 지금까지 안 이어져 있었음).
+            render=cfg.render, control_fps=cfg.get("control_fps", 20.0) if cfg.render else 0.0,
+        )
+    else:
+        metrics = rollout_policy(
+            env=env, policy=policy, normalizer=normalizer,
+            obs_keys=task_obs_keys(cfg.task), obs_horizon=cfg.policy.obs_horizon,
+            action_horizon=cfg.policy.action_horizon, max_steps=cfg.max_steps, num_episodes=cfg.num_episodes,
+            device=device, rgb_keys=cfg.task.rgb_keys if is_image_task(cfg.task) else (),
+            extra_obs_fn=extra_obs_fn, extra_obs_reset_fn=extra_reset_fn, on_episode_step=on_episode_step,
+            verbose=True,
+        )
     if gif_frames:
         gif_frames[0].save(cfg.save_gif, save_all=True, append_images=gif_frames[1:],
                             duration=60, loop=0, optimize=True)
@@ -189,6 +220,7 @@ def _run_openvla_eval(cfg):
 
     if cfg.eval_seed is not None:
         np.random.seed(cfg.eval_seed)
+        torch.manual_seed(cfg.eval_seed)
 
     image_key = cfg.task.rgb_keys[0]
     instruction = cfg.openvla_instruction or SQUARE_INSTRUCTION

@@ -88,12 +88,19 @@ system:
   undesirable_weight: 1.0
   preference_frames: 8    # receding-horizon으로 실제 실행되는 앞 8프레임(pred_horizon=16 중)의
                            # 평균 부호로 desirable/undesirable 판정.
-  reference_ema_momentum: 0.999  # Diffusion-KTO 공식 코드 기본값 그대로(train_kto_sd_v1.5.py,
-                                  # --reference_ema_momentum). LoRA 없이 전체 파라미터를 학습할 때
-                                  # reference를 이 momentum으로 계속 따라가게 해서(2026-07-28 추가)
-                                  # 정적 스냅샷일 때 생기던 "reference 대비 상대적으론 이기는데
-                                  # 절대적 task 능력은 무너지는" 표류를 막는다.
-  reference_ema_every: 20        # 공식 코드와 동일 - 매 20 optimizer step마다 갱신.
+  sampler_target_correct: 0.3333    # balanced sampler(datasets/apo_sampler.py) desirable/undesirable
+  sampler_target_interaction: 0.1667 # 비율. APO 원문 기본값(0.5/0.25/0.25 → desirable:undesirable=3:1)은
+  sampler_target_incorrect: 0.5      # KTO 원문 권장 범위([1,4/3])를 벗어남 — desirable:undesirable=1:1로
+                                      # 고정(correct:interaction=2:1 내부비율은 원문 그대로 유지, 총량만
+                                      # 절반). 근거: EXP-10.md "7차 시도 준비" 절.
+  reference_ema_enabled: false  # APO·Diffusion-KTO 둘 다 기본값이 reference 고정. 근거: EXP-10.md "6차 시도" 절.
+  reference_ema_momentum: 0.999  # enabled=true일 때만 의미 있음(디버깅/재실험용으로 남겨둠).
+  reference_ema_every: 20
+  z0_clamp_min: -50.0  # z0 anchor clamp 범위(APO 원문 방식, 대칭). 근거: EXP-10.md "z0 clamp" 절.
+  z0_clamp_max: 50.0
+  use_lora: false  # true면 policy.unet의 Linear/Conv1d를 LoRA로 래핑, 나머지 freeze(APO 원문은 항상 true).
+  lora_rank: 32    # APO 원문 값.
+  lora_alpha: 32
 
 # 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
 # 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의
@@ -111,6 +118,9 @@ output_dir: outputs/${task.name}/${policy.name}/${now:%Y%m%d-%H%M%S}
 device: cuda
 use_wandb: false
 wandb_project: mani_sim
+wandb_run_name: null  # null이면 "{task}_{policy_name}" 기본값
+wandb_group: null
+wandb_tags: []
 
 # hydra 자체 로그/설정 스냅샷(.hydra/)도 같은 폴더에 쌓아 체크포인트와 분리되지 않게 한다
 # (전엔 outputs/<날짜>/<시각>/에 따로 생겼음 — hydra는 cwd는 안 바꾸므로(확인함, 2026-07-25)

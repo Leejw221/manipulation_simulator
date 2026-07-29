@@ -19,6 +19,16 @@ device: cuda
 # 학습 스케줄러 그대로 - collect.yaml의 동일 이름 필드와 같은 메커니즘, runners/rollout.py의
 # maybe_speed_up_inference 참고, 2026-07-27). null이면 안 바꿈(DDPM 그대로, 끊길 수 있음).
 deploy_num_inference_steps: 10
+# true면 8스텝(action_horizon) 열린 루프 재생 대신 moai_policy 스타일 매 스텝 재계획
+# (collect.py 배포와 동일한 async_infer 경로, runners/rollout.py의 rollout_policy_async
+# 참고, 2026-07-28)으로 성공률을 측정한다. render=true/false 둘 다와 무관하게 독립적으로
+# 적용됨(render는 화면 표시 여부, async_infer는 재계획 방식 - 서로 다른 축).
+# ⚠ 이 값을 바꾸면 기존에 async_infer=false로 측정해둔 수치(EXP-10 등)와 직접 비교 불가 -
+# 같은 조건끼리만 비교할 것.
+async_infer: false
+merger_name: overwrite  # collect.yaml과 동일 - async_infer=true일 때만 의미 있음
+te_coeff: 0.01
+control_fps: 20  # render=true + async_infer=true일 때만 실시간 페이싱에 사용(collect.yaml과 동일 개념)
 # 추론 결과(metrics.json)를 남길 폴더 — 학습 output_dir과 같은 컨벤션(task/policy/시각),
 # 단 eval/ 아래 시각은 "추론한 시각"(학습 시각 아님). eval.py가 직접 os.makedirs+저장한다
 # (train.yaml처럼 hydra.run.dir을 여기 맞추지 않음 — use_run_config가 hydra 부트스트랩

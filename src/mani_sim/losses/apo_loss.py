@@ -1,13 +1,10 @@
 """시스템 축 — apo (reference 모델 + KTO 앵커 필요).
 
 원문 대조: GeWu-Lab/Action-Preference-Optimization trainer/ddp_robotic_trainer.py
-APOTrainer.loss()/get_batch_metrics() (L173-364) [검증-원문, 2026-07-16]. 단, z0(KL 앵커)
-추정은 APO 원문(mismatch pair)이 아니라 **Diffusion-KTO 기본값**(arXiv:2404.04465,
-`--bce_offset none`: batch 평균 + `clamp(min=0)`)을 따른다 — 우리 reward가 토큰확률이
-아니라 노이즈예측 MSE 차이(Diffusion-KTO와 같은 영역)라 mismatch 우회가 불필요하고,
-그만큼 UNet forward가 절반(2회)으로 준다. 근거·논의: HANDOFF.md 2026-07-27 새벽 결정.
-⚠️ `clamp(min=0)`은 "정책이 reference보다 나빠지는 방향엔 보상 없음"이라 정책이 계속
-못 나아지면 z0가 0에 붙는다 — 학습 중 z0를 감시할 것.
+APOTrainer.loss()/get_batch_metrics() (L173-364) [검증-원문, 2026-07-16]. z0(anchor) 추정은
+mismatch pair 대신 batch reward 평균을 쓴다(우리 reward가 노이즈예측 MSE 차이라 가능,
+Diffusion-KTO와 동일 방식). clamp 범위는 APO 원문 방식(대칭, 음수 허용) — 상세 근거는
+EXP-10.md "z0 clamp" 절 참고.
 
 SIRIUS와의 결정적 차이: **reference 모델(정책의 이전 상태, 고정)이 필요**하다 — reward를
 "GT action을 policy가 reference보다 얼마나 더 그럴듯하다고 보는가"(log-ratio)로 정의하고,
@@ -41,11 +38,15 @@ class APOKTOLoss:
         desirable_weight=1.0,
         undesirable_weight=1.0,
         preference_frames=8,
+        z0_clamp_min=-50.0,
+        z0_clamp_max=50.0,
     ):
         self.beta = beta
         self.desirable_weight = desirable_weight
         self.undesirable_weight = undesirable_weight
         self.preference_frames = preference_frames
+        self.z0_clamp_min = z0_clamp_min
+        self.z0_clamp_max = z0_clamp_max
 
     def compute(self, log_probs, ref_log_probs, weight, action_mode_window):
         """log_probs, ref_log_probs, weight: (B, T) — 패딩 프레임은 호출부가 미리 0으로
@@ -54,30 +55,48 @@ class APOKTOLoss:
         반환: (scalar loss, dict 진단 지표).
         """
         reward = log_probs.sum(dim=1) - ref_log_probs.sum(dim=1)  # (B,)
-        z0 = reward.detach().mean().clamp(min=0.0)
+        # 대칭 clamp(APO 원문 방식) — 근거: EXP-10.md "z0 clamp" 절.
+        z0 = reward.detach().mean().clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
 
         mask = _desirable_mask(action_mode_window, preference_frames=self.preference_frames)
         sample_weight = weight.mean(dim=1)  # (B,T) -> (B,) — class_based처럼 T별로 다르면 평균
 
+        n_chosen = int(mask.sum().item())
+        n_rejected = int((~mask).sum().item())
+
         chosen_reward = reward[mask]
         chosen_losses = self.desirable_weight * (1 - torch.sigmoid(self.beta * (chosen_reward - z0)))
-        chosen_weight = sample_weight[mask]
+        chosen_weight_raw = sample_weight[mask]
+        chosen_weight_sum = float(chosen_weight_raw.sum().item()) if n_chosen else 0.0
+        # 그룹 내 평균을 1.0으로 재정규화 — action_error weight의 그룹합이 exp(-x) 곡률 때문에
+        # 그룹 크기에 비대칭적으로 반응해(desirable은 beta_d 근처로 포화, undesirable은 n에
+        # 비례) 의도치 않게 그룹 간 loss 기여도를 왜곡시킨다(EXP-10.md "7차 시도" 절 참고).
+        # 재정규화 후엔 그룹별 총 기여도가 desirable_weight/undesirable_weight·n_chosen/
+        # n_rejected로만 결정된다.
+        chosen_weight = chosen_weight_raw / max(chosen_weight_sum, 1e-8) * n_chosen if n_chosen else chosen_weight_raw
 
         rejected_reward = reward[~mask]
         rejected_losses = self.undesirable_weight * (1 - torch.sigmoid(self.beta * (z0 - rejected_reward)))
-        rejected_weight = sample_weight[~mask]
+        rejected_weight_raw = sample_weight[~mask]
+        rejected_weight_sum = float(rejected_weight_raw.sum().item()) if n_rejected else 0.0
+        rejected_weight = (
+            rejected_weight_raw / max(rejected_weight_sum, 1e-8) * n_rejected if n_rejected else rejected_weight_raw
+        )
 
         losses = torch.cat([chosen_losses, rejected_losses])
         weights = torch.cat([chosen_weight, rejected_weight])
         total_loss = (losses * weights).sum()
 
-        n_chosen = int(mask.sum().item())
-        n_rejected = int((~mask).sum().item())
         metrics = OrderedDict(
             num_chosen=n_chosen,
             num_rejected=n_rejected,
             reward_chosen_mean=float(chosen_reward.detach().mean().item()) if n_chosen else float("nan"),
             reward_rejected_mean=float(rejected_reward.detach().mean().item()) if n_rejected else float("nan"),
             z0=float(z0.item()),
+            reward_min=float(reward.detach().min().item()),
+            reward_max=float(reward.detach().max().item()),
+            reward_std=float(reward.detach().std().item()) if reward.numel() > 1 else 0.0,
+            raw_weight_sum_chosen=chosen_weight_sum,
+            raw_weight_sum_rejected=rejected_weight_sum,
         )
         return total_loss, metrics

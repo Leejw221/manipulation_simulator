@@ -99,7 +99,45 @@ def rollout_policy(
     (2026-07-27 추가 - eval.py에서 render=true로 여러 에피소드를 눈으로 지켜볼 때, 화면만
     보고 일일이 세지 않아도 되게). 기본 False라 diffusion_trainer.py의 학습 중 주기 평가·
     rq1_weight_vs_success.py 등 기존 호출부는 로그가 안 늘어남. 에피소드별 success/steps는
-    verbose와 무관하게 항상 가볍게(트래젝토리 전체 저장 아님) `metrics["episodes"]`로 반환."""
+    verbose와 무관하게 항상 가볍게(트래젝토리 전체 저장 아님) `metrics["episodes"]`로 반환.
+
+    extra_obs_fn/extra_obs_reset_fn/save_trajectory_keys/on_episode_step이 전부 없으면
+    (=eval.py의 기본 헤드리스 호출) intervention_rollout.collect_episode()에 그대로
+    위임한다(2026-07-28) — collect.py 배포와 "청크→액션 실행" 로직을 완전히 같은 코드로
+    공유하기 위함(둘이 따로 구현돼 있으면 한쪽만 고치고 잊는 사고가 또 날 수 있음, 실제로
+    DDIM 가속이 collect.py에만 들어갔다가 나중에 발견된 전례가 있음). 저 네 기능은
+    collect_episode가 지원하지 않아서(예: save_trajectory_keys는 obs_keys 밖의 키까지
+    저장해야 하는데 PICO 배포엔 그 기능이 전혀 필요 없음 - 억지로 넣으면 배포 스크립트가
+    연구 분석 전용 기능으로 지저분해짐) 이 경우만 기존 구현을 그대로 유지."""
+    if (extra_obs_fn is None and extra_obs_reset_fn is None
+            and save_trajectory_keys is None and on_episode_step is None):
+        from mani_sim.runners.intervention_rollout import _predict_chunk, collect_episode
+
+        policy.eval()
+
+        def predict_fn(obs_history):
+            return _predict_chunk(policy, normalizer, obs_history, obs_keys, device, rgb_keys=rgb_keys)
+
+        successes, episodes = [], []
+        for ep in range(num_episodes):
+            result = collect_episode(
+                env, policy, normalizer, obs_keys, obs_horizon, action_horizon, device,
+                lambda step, obs_raw: None, max_steps=max_steps, render=False, control_fps=0.0,
+                predict_fn=predict_fn, async_infer=False,
+            )
+            success = result["success"]
+            step_count = len(result["actions"])
+            successes.append(success)
+            episodes.append({"episode": ep, "success": success, "steps": step_count})
+            if verbose:
+                print(f"ep {ep}: steps={step_count} success={success}")
+        return {
+            "success_rate": float(np.mean(successes)),
+            "num_episodes": num_episodes,
+            "num_successes": int(np.sum(successes)),
+            "episodes": episodes,
+        }
+
     policy.eval()
     successes = []
     episodes = []
@@ -163,3 +201,45 @@ def rollout_policy(
     if trajectories is not None:
         metrics["trajectories"] = trajectories
     return metrics
+
+
+def rollout_policy_async(
+    env, policy, normalizer, obs_keys, obs_horizon, action_horizon, max_steps, num_episodes, device,
+    rgb_keys=(), verbose=False, merger_name="overwrite", te_coeff=0.01, render=False, control_fps=0.0,
+):
+    """rollout_policy()와 같은 metrics를 반환하지만, action_horizon 스텝마다 멈춰서
+    재계획하는 대신 moai_policy 스타일 연속 재계획(매 스텝 최신 관측으로 재추론)을 쓴다.
+    collect.py의 PICO 배포에서만 쓰던 intervention_rollout.collect_episode()의 async_infer
+    경로를 그대로 재사용(2026-07-28) — round0 배포 때 체감 성공률이 헤드리스 eval보다
+    좋아 보인다는 관찰이 나와, 8스텝 열린 루프 재생 대신 이 방식으로도 성공률을 잴 수
+    있게 함. stage tracker 등 extra_obs_fn 계열은 아직 미지원(필요해지면 추가)."""
+    from mani_sim.runners.intervention_rollout import _predict_chunk, collect_episode
+
+    policy.eval()
+
+    def predict_fn(obs_history):
+        return _predict_chunk(policy, normalizer, obs_history, obs_keys, device, rgb_keys=rgb_keys)
+
+    def no_intervention(step, obs_raw):
+        return None
+
+    successes, episodes = [], []
+    for ep in range(num_episodes):
+        result = collect_episode(
+            env, policy, normalizer, obs_keys, obs_horizon, action_horizon, device,
+            no_intervention, max_steps=max_steps, render=render, control_fps=control_fps,
+            predict_fn=predict_fn, async_infer=True, merger_name=merger_name, te_coeff=te_coeff,
+        )
+        success = result["success"]
+        step_count = len(result["actions"])
+        successes.append(success)
+        episodes.append({"episode": ep, "success": success, "steps": step_count})
+        if verbose:
+            print(f"ep {ep}: steps={step_count} success={success}")
+
+    return {
+        "success_rate": float(np.mean(successes)),
+        "num_episodes": num_episodes,
+        "num_successes": int(np.sum(successes)),
+        "episodes": episodes,
+    }

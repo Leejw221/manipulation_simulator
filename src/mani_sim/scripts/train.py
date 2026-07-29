@@ -54,8 +54,13 @@ def main(cfg: DictConfig):
 
     if cfg.use_wandb:
         import wandb
-        wandb.init(project=cfg.wandb_project, name=f"{cfg.task.name}_{cfg.policy_name}",
-                   config=OmegaConf.to_container(cfg, resolve=True))
+        wandb.init(
+            project=cfg.wandb_project,
+            name=cfg.wandb_run_name or f"{cfg.task.name}_{cfg.policy_name}",
+            group=cfg.get("wandb_group", None),
+            tags=list(cfg.get("wandb_tags", [])),
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
 
     runner = runner_cls(cfg, policy, device)
 

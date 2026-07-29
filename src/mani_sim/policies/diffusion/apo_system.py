@@ -35,19 +35,30 @@ import torch.nn.functional as F
 
 from mani_sim.factory import registry
 from mani_sim.losses.apo_loss import APOKTOLoss
+from mani_sim.networks.lora import apply_lora
 
 
 class ApoSystem:
     def __init__(self, policy, weighting, beta, desirable_weight, undesirable_weight,
-                 preference_frames, init_state_dict=None, reference_ema_momentum=0.999,
-                 reference_ema_every=20):
+                 preference_frames, init_state_dict=None, reference_ema_enabled=False,
+                 reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
+                 z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
         warm-start하고 reference를 그 시점에서 복제한다 — APO 원문이 policy/reference를
         같은 vla_path(직전 라운드 정책)에서 로드해 둘 다 같은 지점에서 출발시키는 것과 동일
         [검증-원문]. 학습 시작 시 reward가 정확히 0이 되는 게 이 설계의 의도된 결과다.
-        reference_ema_momentum/every: Diffusion-KTO 공식값(0.999, 20 step) 그대로 기본값."""
+
+        reference_ema_enabled(기본 False): APO 원문(갱신 코드 없음)·Diffusion-KTO 원문
+        (`--reference_ema` 기본값 False, 논문도 언급 없음) 둘 다 reference를 고정해서 쓴다
+        — 6차 시도부터 기본값을 이걸로 되돌림(근거: EXP-10.md "6차 시도" 절).
+
+        use_lora(기본 False, APO는 항상 True): policy.unet의 Linear/Conv1d를
+        LoRA(r=lora_rank)로 래핑, 나머지는 전부 freeze. reference는 LoRA 적용 *전* 상태를
+        복제하므로 자동으로 "순수 base 가중치"가 된다(APO 공식 코드의
+        `reference_model.disable_adapters()`와 수학적으로 동일 — LoRA는 가산적이라
+        adapter 없는 forward와 base-only 복제본은 항상 같은 출력을 낸다)."""
         if init_state_dict is not None:
             policy.load_state_dict(init_state_dict)
 
@@ -56,24 +67,39 @@ class ApoSystem:
         for p in reference.parameters():
             p.requires_grad_(False)
         self.reference = reference
+
+        self.use_lora = use_lora
+        if use_lora:
+            for p in policy.parameters():
+                p.requires_grad_(False)
+            apply_lora(policy.unet, rank=lora_rank, alpha=lora_alpha)
+
+        self.reference_ema_enabled = reference_ema_enabled
         self.reference_ema_momentum = reference_ema_momentum
         self.reference_ema_every = reference_ema_every
 
         self.weighting = weighting
         self.kto_loss = APOKTOLoss(
             beta=beta, desirable_weight=desirable_weight, undesirable_weight=undesirable_weight,
-            preference_frames=preference_frames,
+            preference_frames=preference_frames, z0_clamp_min=z0_clamp_min, z0_clamp_max=z0_clamp_max,
         )
+        self.last_ref_distance = 0.0
 
     @torch.no_grad()
     def update_reference_ema(self, policy, global_step):
-        """trainer가 매 optimizer.step() 직후 호출 - reference_ema_every 배수 스텝에서만
-        실제로 갱신한다(Diffusion-KTO 공식 코드의 `(global_step+1) % 20 == 0` 그대로)."""
+        """trainer가 매 optimizer.step() 직후 호출 - reference_ema_enabled=False(기본,
+        6차부터)면 아무것도 안 함. True면 reference_ema_every 배수 스텝에서만 실제로
+        갱신한다(Diffusion-KTO 공식 코드의 `(global_step+1) % 20 == 0` 그대로)."""
+        if not self.reference_ema_enabled:
+            return
         if (global_step + 1) % self.reference_ema_every != 0:
             return
         decay = self.reference_ema_momentum
+        sq_dist = 0.0
         for ref_p, policy_p in zip(self.reference.parameters(), policy.parameters()):
+            sq_dist += (ref_p - policy_p).pow(2).sum().item()
             ref_p.mul_(decay).add_(policy_p, alpha=1.0 - decay)
+        self.last_ref_distance = sq_dist ** 0.5
 
     def compute_loss(self, policy, batch, action_mode):
         """batch: {'obs','action','action_mask'} — trainer가 다른 경로와 똑같이 만드는 그대로.
@@ -109,7 +135,9 @@ class ApoSystem:
         # 동일하게 적용하니 reward=차이 계산에서 마스킹 효과가 상쇄되지 않고 그대로 남는다).
         log_probs = -model_mse * mask
         ref_log_probs = -ref_mse * mask
-        return self.kto_loss.compute(log_probs, ref_log_probs, weight, action_mode)
+        total_loss, metrics = self.kto_loss.compute(log_probs, ref_log_probs, weight, action_mode)
+        metrics["ref_distance"] = self.last_ref_distance
+        return total_loss, metrics
 
 
 @registry.register_system("apo")
@@ -119,6 +147,12 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         policy, weighting, beta=sys_cfg.beta, desirable_weight=sys_cfg.desirable_weight,
         undesirable_weight=sys_cfg.undesirable_weight, preference_frames=sys_cfg.preference_frames,
         init_state_dict=init_state_dict,
+        reference_ema_enabled=sys_cfg.get("reference_ema_enabled", False),
         reference_ema_momentum=sys_cfg.get("reference_ema_momentum", 0.999),
         reference_ema_every=sys_cfg.get("reference_ema_every", 20),
+        z0_clamp_min=sys_cfg.get("z0_clamp_min", -50.0),
+        z0_clamp_max=sys_cfg.get("z0_clamp_max", 50.0),
+        use_lora=sys_cfg.get("use_lora", False),
+        lora_rank=sys_cfg.get("lora_rank", 32),
+        lora_alpha=sys_cfg.get("lora_alpha", 32),
     )
