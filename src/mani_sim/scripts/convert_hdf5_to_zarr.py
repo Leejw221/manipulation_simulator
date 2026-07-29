@@ -12,11 +12,12 @@ num_workers>=1이면 이미지 전체를 메모리에 캐싱해야 하는데(dif
 이미지는 collect.py가 이미 raw(HWC, uint8) 포맷으로 저장하므로(2026-07-27 이미지 포맷 버그
 수정) 별도 변환 없이 그대로 복사한다.
 
-⚠ 이 변환기 산출물은 아직 학습 파이프라인(diffusion_trainer.py의 task/env_backend 분기)에
-연결돼 있지 않다 - Transport는 로봇수트(robosuite) env로 rollout/eval을 계속 해야 하는데,
-지금 `env_backend=zarr` 분기(task_utils.derive_task_meta_from_zarr)는 Piper의 raw MuJoCo
-전용으로 짜여 있어 "저장은 Zarr, 시뮬레이션은 robosuite"라는 조합이 없다. 이 스크립트는 변환
-결과물이 ZarrSequenceDataset으로 정상적으로 읽히는지까지만 검증한다.
+학습 파이프라인 연결: task.yaml에 `dataset_backend=zarr`+`zarr_path=...`를 얹으면(로봇수트
+task도 CLI에서 `+task.dataset_backend=zarr +task.zarr_path=...`로 추가 가능) 시뮬레이터
+(env_backend, robosuite 그대로 유지)는 안 건드리고 학습 데이터 저장 포맷만 hdf5->Zarr로
+바뀐다(task_utils.uses_zarr_dataset이 이 둘을 독립 축으로 분리— 2026-07-27 밤). "저장은
+Zarr, 시뮬레이션은 robosuite"로 Square 200개 데모 학습을 실전 검증함(2026-07-29,
+num_workers=4로 OOM 없이 정상 진행 — mani_sim_status.md 참고).
 
 사용: python -m mani_sim.scripts.convert_hdf5_to_zarr task=transport_demo20 \
     hdf5_path=outputs/intervention/transport_round0_cumulative.hdf5 \
