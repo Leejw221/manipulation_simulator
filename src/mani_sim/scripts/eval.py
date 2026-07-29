@@ -275,17 +275,20 @@ def main(cfg: DictConfig):
     logger.info(f"checkpoint={cfg.checkpoint_path} {metrics}")
     print(metrics)
 
-    os.makedirs(cfg.output_dir, exist_ok=True)
+    output_dir = cfg.output_dir or os.path.join(
+        os.path.dirname(cfg.checkpoint_path), "eval_results", time.strftime("%Y%m%d-%H%M%S")
+    )
+    os.makedirs(output_dir, exist_ok=True)
     # episodes(에피소드별 success/steps, rollout_policy의 verbose=True와 짝 - 2026-07-27)는
     # metrics.json엔 안 넣는다 - 그 파일은 원래 집계(success_rate 등)만 담는 관례라, 대신
     # episodes.csv로 따로 저장해 나중에 화면 안 보고도 통계/에피소드별 리뷰가 가능하게 한다.
     episodes = metrics.pop("episodes", None)
-    with open(os.path.join(cfg.output_dir, "metrics.json"), "w") as f:
+    with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump({"checkpoint_path": cfg.checkpoint_path, **metrics}, f, indent=2)
     if episodes:
         import csv
 
-        episodes_path = os.path.join(cfg.output_dir, "episodes.csv")
+        episodes_path = os.path.join(output_dir, "episodes.csv")
         with open(episodes_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["episode", "success", "steps"])
             writer.writeheader()

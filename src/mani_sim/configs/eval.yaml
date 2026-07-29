@@ -29,12 +29,10 @@ async_infer: false
 merger_name: overwrite  # collect.yaml과 동일 - async_infer=true일 때만 의미 있음
 te_coeff: 0.01
 control_fps: 20  # render=true + async_infer=true일 때만 실시간 페이싱에 사용(collect.yaml과 동일 개념)
-# 추론 결과(metrics.json)를 남길 폴더 — 학습 output_dir과 같은 컨벤션(task/policy/시각),
-# 단 eval/ 아래 시각은 "추론한 시각"(학습 시각 아님). eval.py가 직접 os.makedirs+저장한다
-# (train.yaml처럼 hydra.run.dir을 여기 맞추지 않음 — use_run_config가 hydra 부트스트랩
-# *이후*(main() 안)에 task를 덮어써서, hydra 자신의 run.dir은 override 전 기본값(task=square)
-# 기준으로 이미 고정된 뒤라 맞추면 오히려 산출물이 두 폴더로 쪼개짐, 2026-07-25 실측).
-output_dir: outputs/${task.name}/${policy_name}/eval/${now:%Y%m%d-%H%M%S}
+# 추론 결과(metrics.json) 저장 폴더. null(기본)이면 eval.py가 checkpoint_path 옆에
+# eval_results/<추론 시각>/으로 자동 생성(moai_policy 컨벤션 — 어느 체크포인트를 평가한
+# 결과인지 폴더 위치만으로 바로 알 수 있음). 명시적으로 주면 그 경로를 그대로 씀.
+output_dir: null
 # 지정하면 rollout 직전 np.random.seed(eval_seed) 호출 — 너트 초기 위치 시퀀스를 고정해서
 # 서로 다른 체크포인트를 "같은 200개 시나리오"로 평가(공정 비교, 어려운 배치 쏠림 방지).
 eval_seed: null

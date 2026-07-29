@@ -101,6 +101,11 @@ system:
   use_lora: false  # true면 policy.unet의 Linear/Conv1d를 LoRA로 래핑, 나머지 freeze(APO 원문은 항상 true).
   lora_rank: 32    # APO 원문 값.
   lora_alpha: 32
+  bc_aux_weight: 0.0  # 원문엔 없는 항(기본 0=꺼짐). KTO sigmoid가 이미 reward>z0인 desirable
+                       # 샘플에서 saturate돼 보호 gradient가 없다는 걸 round0에서 실측 확인
+                       # (base가 잘하던 reach가 8회 시도 전부에서 무너짐, weighting 축 유무와
+                       # 무관) — desirable 샘플에 표준 noise-MSE loss를 더해 saturate돼도
+                       # "이 행동을 계속 재현하라"는 gradient가 남게 함. 근거: EXP-10.md.
 
 # 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
 # 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의

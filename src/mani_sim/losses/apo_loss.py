@@ -48,15 +48,19 @@ class APOKTOLoss:
         self.z0_clamp_min = z0_clamp_min
         self.z0_clamp_max = z0_clamp_max
 
-    def compute(self, log_probs, ref_log_probs, weight, action_mode_window):
+    def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None):
         """log_probs, ref_log_probs, weight: (B, T) — 패딩 프레임은 호출부가 미리 0으로
         마스킹해서 넘긴다(합산에서 자동 제외). action_mode_window: (B, W), W>=preference_frames.
+        mismatch_reward: (B,) 또는 None — KTO/APO 원문 방식의 mismatched-pair reward(호출부가
+        계산해서 넘김). 주어지면 z0를 여기서 추정(원문 그대로), None이면 구버전 호환으로
+        matched reward의 배치 평균을 씀(EXP-10.md "z0 mismatched pair" 절 — 이게 버그였음).
 
         반환: (scalar loss, dict 진단 지표).
         """
         reward = log_probs.sum(dim=1) - ref_log_probs.sum(dim=1)  # (B,)
+        z0_source = mismatch_reward if mismatch_reward is not None else reward
         # 대칭 clamp(APO 원문 방식) — 근거: EXP-10.md "z0 clamp" 절.
-        z0 = reward.detach().mean().clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
+        z0 = z0_source.detach().mean().clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
 
         mask = _desirable_mask(action_mode_window, preference_frames=self.preference_frames)
         sample_weight = weight.mean(dim=1)  # (B,T) -> (B,) — class_based처럼 T별로 다르면 평균

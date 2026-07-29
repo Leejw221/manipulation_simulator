@@ -33,6 +33,7 @@ import copy
 import torch
 import torch.nn.functional as F
 
+from mani_sim.datasets.labels import desirable_mask as _desirable_mask
 from mani_sim.factory import registry
 from mani_sim.losses.apo_loss import APOKTOLoss
 from mani_sim.networks.lora import apply_lora
@@ -42,7 +43,8 @@ class ApoSystem:
     def __init__(self, policy, weighting, beta, desirable_weight, undesirable_weight,
                  preference_frames, init_state_dict=None, reference_ema_enabled=False,
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
-                 z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32):
+                 z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
+                 bc_aux_weight=0.0):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -84,6 +86,13 @@ class ApoSystem:
             preference_frames=preference_frames, z0_clamp_min=z0_clamp_min, z0_clamp_max=z0_clamp_max,
         )
         self.last_ref_distance = 0.0
+        # bc_aux_weight(기본 0=원문 그대로): KTO sigmoid는 이미 reward>z0인 desirable
+        # 샘플에서 gradient가 saturate돼(Prop 4.1) 그 샘플을 "지켜주는" 힘이 없다 — round0에서
+        # 실측 확인(EXP-10.md "Degradation 직접 검증" 절): base가 이미 잘하던 reach가 8번의
+        # 시도(가중치 축 유무 무관) 전부에서 무너짐. 이 항은 desirable 샘플에 sigmoid와 무관한
+        # 표준 noise-prediction MSE를 더해, saturate돼도 "이 행동을 계속 재현하라"는 gradient가
+        # 남게 한다 — 원문에는 없는 항이며, 우리가 실측으로 특정한 실패 메커니즘을 겨냥한 수정.
+        self.bc_aux_weight = bc_aux_weight
 
     @torch.no_grad()
     def update_reference_ema(self, policy, global_step):
@@ -125,6 +134,31 @@ class ApoSystem:
         ref_mse = F.mse_loss(ref_pred, noise, reduction="none").mean(dim=-1)
 
         mask = action_mask.float()
+
+        # z0(KL anchor) — KTO 원문 방식: 배치 자기 자신의 (state,action) reward가 아니라
+        # state는 그대로 두고 action만 다른 샘플 것으로 섞은 mismatched pair로 별도 추정한다
+        # (KTO paper Implementation 절 "matching inputs x′ with unrelated outputs yU′",
+        # APO 원문 코드의 `mismatch_label` 확인, 2026-07-29). 안 그러면 z0=mean(chosen,rejected)
+        # 라 rejected를 세게 밀어내기만 해도 z0가 같이 낮아져 chosen의 절대 품질 개선 없이
+        # sigmoid 조건을 만족시키는 loophole이 생긴다 — 1~9차 전부 이 방식(버그)으로 학습됨.
+        # KL 항은 역전파 안 함(원문 "we do not back-propagate through the KL term").
+        with torch.no_grad():
+            mismatch_reward = None
+            if B > 1:
+                perm = torch.randperm(B, device=device)
+                if (perm == torch.arange(B, device=device)).all():
+                    perm = torch.roll(perm, 1)
+                mismatch_action = action[perm]
+                mismatch_mask = mask * mask[perm]
+                mismatch_noisy = scheduler.add_noise(mismatch_action, noise, timesteps)
+                mismatch_pred = policy.unet(mismatch_noisy, timesteps, cond)
+                mismatch_model_mse = F.mse_loss(mismatch_pred, noise, reduction="none").mean(dim=-1)
+                mismatch_ref_pred = self.reference.unet(mismatch_noisy, timesteps, ref_cond)
+                mismatch_ref_mse = F.mse_loss(mismatch_ref_pred, noise, reduction="none").mean(dim=-1)
+                mismatch_reward = (-mismatch_model_mse * mismatch_mask).sum(dim=1) - (
+                    -mismatch_ref_mse * mismatch_mask
+                ).sum(dim=1)
+
         if self.weighting is not None:
             error = (model_mse.detach() * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
             weight = self.weighting.compute_weights(action_mode, error=error)  # (B, Tp)
@@ -135,7 +169,17 @@ class ApoSystem:
         # 동일하게 적용하니 reward=차이 계산에서 마스킹 효과가 상쇄되지 않고 그대로 남는다).
         log_probs = -model_mse * mask
         ref_log_probs = -ref_mse * mask
-        total_loss, metrics = self.kto_loss.compute(log_probs, ref_log_probs, weight, action_mode)
+        total_loss, metrics = self.kto_loss.compute(
+            log_probs, ref_log_probs, weight, action_mode, mismatch_reward=mismatch_reward
+        )
+
+        if self.bc_aux_weight > 0:
+            des = _desirable_mask(action_mode, preference_frames=self.kto_loss.preference_frames)
+            per_sample_error = (model_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
+            bc_loss = (per_sample_error * des.float()).sum()  # sum, not mean — matches kto_loss's sum convention
+            total_loss = total_loss + self.bc_aux_weight * bc_loss
+            metrics["bc_aux_loss"] = bc_loss.item()
+
         metrics["ref_distance"] = self.last_ref_distance
         return total_loss, metrics
 
@@ -155,4 +199,5 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         use_lora=sys_cfg.get("use_lora", False),
         lora_rank=sys_cfg.get("lora_rank", 32),
         lora_alpha=sys_cfg.get("lora_alpha", 32),
+        bc_aux_weight=sys_cfg.get("bc_aux_weight", 0.0),
     )
