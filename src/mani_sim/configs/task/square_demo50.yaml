@@ -1,0 +1,17 @@
+name: square_demo50
+env_name: NutAssemblySquare
+robots: Panda
+# square.yaml의 200개 중 seed=42로 무작위 추출한 50개(SIRIUS Nut Assembly 데모 개수와 맞춤).
+# filter_key 대신 독립된 hdf5 파일로 따로 저장(round0 base로 재사용 예정 - collect.py/
+# merge_rounds.py의 round 누적 워크플로우가 hdf5 단위로 동작하므로, 200개짜리 원본에 얹은
+# filter_key보다 독립 파일이 이후 라운드 확장에 맞음).
+hdf5_path: data/robomimic/square_demo50/ph/v1.5/square_demo50/ph/square_image_v15.hdf5
+camera_names: [agentview, robot0_eye_in_hand]
+image_size: 84
+rgb_keys: [agentview_image, robot0_eye_in_hand_image]
+lowdim_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos]
+obs_dims:
+  robot0_eef_pos: 3
+  robot0_eef_quat: 4
+  robot0_gripper_qpos: 2
+action_dim: 7
