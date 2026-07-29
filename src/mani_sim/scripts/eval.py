@@ -36,6 +36,68 @@ from mani_sim.utils.task_utils import is_image_task, is_piper_task, make_eval_en
 logger = logging.getLogger(__name__)
 
 
+def _patch_mjviewer_esc_quit():
+    """robosuite의 MjviewerRenderer.update()는 mujoco.viewer.launch_passive()에 key_callback을
+    안 넘겨서, 이 렌더러로는 ESC로 창을 닫을 방법이 없다(add_keypress_callback도 이 렌더러에선
+    저장만 하고 아무데도 안 불림 - opencv_renderer 전용으로만 실제 연결돼 있음, 2026-07-29
+    확인). site-packages는 안 건드리고 mani_sim 쪽에서 update()만 ESC 콜백 추가해 패치한다.
+
+    key_callback은 launch_passive가 띄운 렌더 스레드에서 불린다 - 처음엔 거기서 바로
+    self.viewer.close()(=GL 윈도우 파괴)를 했는데, 다른 스레드가 만든 GL 컨텍스트를 그
+    스레드가 아닌 곳에서 부르는 거라 창이 멈춘 채 안 닫히는 증상으로 이어졌다(2026-07-29
+    실측: ESC 누르면 렌더는 멈추는데 프로세스가 안 끝남). 그래서 콜백은 플래그만 세우고,
+    실제 close()는 메인 스레드(_mjviewer_is_running이 감지한 뒤, rollout_policy가 루프를
+    끝내고 나서 _run_dp_eval의 env.env.close())가 하도록 옮겼다."""
+    from mujoco import viewer as mj_viewer
+    from robosuite.renderers.mjviewer.mjviewer_renderer import MjviewerRenderer
+
+    if getattr(MjviewerRenderer, "_esc_patched", False):
+        return
+
+    def _update_with_esc(self):
+        if self.viewer is None:
+            self._esc_pressed = False
+
+            def _key_callback(keycode):
+                if keycode == 256:  # GLFW_KEY_ESCAPE
+                    self._esc_pressed = True
+
+            self.viewer = mj_viewer.launch_passive(
+                self.env.sim.model._model, self.env.sim.data._data,
+                show_left_ui=False, show_right_ui=False, key_callback=_key_callback,
+            )
+            self.viewer.opt.geomgroup[0] = 0
+            if self.camera_config is not None:
+                self.viewer.cam.lookat = self.camera_config["lookat"]
+                self.viewer.cam.distance = self.camera_config["distance"]
+                self.viewer.cam.azimuth = self.camera_config["azimuth"]
+                self.viewer.cam.elevation = self.camera_config["elevation"]
+            if self.camera_id is not None:
+                if self.camera_id >= 0:
+                    self.viewer.cam.type = 2
+                    self.viewer.cam.fixedcamid = self.camera_id
+                else:
+                    self.viewer.cam.type = 0
+        self.viewer.sync()
+
+    MjviewerRenderer.update = _update_with_esc
+    MjviewerRenderer._esc_patched = True
+
+
+def _mjviewer_is_running(env) -> bool:
+    """render=true 루프에서 매 스텝(메인 스레드에서) 호출 -- ESC 플래그가 섰거나 창을 직접
+    닫아(X 버튼, mujoco.viewer 자체 지원) is_running()이 False가 됐으면 False. 뷰어가 아직
+    없거나 mjviewer가 아니면 True(중단 신호 아님). 실제 close()는 여기서 호출하지 않는다 -
+    호출부가 False를 받아 rollout을 끝낸 뒤 env.env.close()가 메인 스레드에서 처리한다."""
+    renderer = getattr(getattr(env, "env", env), "viewer", None)
+    handle = getattr(renderer, "viewer", None)
+    if handle is None:
+        return True
+    if getattr(renderer, "_esc_pressed", False):
+        return False
+    return handle.is_running()
+
+
 def _apply_run_config(cfg):
     """checkpoint_path 옆 run_config.yaml(학습 시 자동 저장)이 있으면 task/policy/policy_name을
     거기서 통째로 교체해 학습·추론 설정이 어긋나는 걸 막는다(2026-07-25). 없으면(구 체크포인트,
@@ -126,10 +188,12 @@ def _run_dp_eval(cfg, device):
         # 한다(collect.py의 배포 가속과 동일 함수, 2026-07-27). 학습/성공률 측정(render=false
         # 호출)은 이 분기 자체를 안 타므로 전혀 영향 없음.
         maybe_speed_up_inference(policy, cfg.get("deploy_num_inference_steps", None))
+        _patch_mjviewer_esc_quit()
 
         def on_episode_step(env_, ep, step):
             env_.render()
             time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
+            return _mjviewer_is_running(env_)
     elif cfg.save_gif and is_image_task(cfg.task):
         env = make_eval_env(cfg.task)
         gif_frames = []
@@ -145,10 +209,12 @@ def _run_dp_eval(cfg, device):
     elif cfg.render:
         # low_dim: MuJoCo 네이티브 mjviewer(온스크린).
         env = make_eval_env(cfg.task, render=True)
+        _patch_mjviewer_esc_quit()
 
         def on_episode_step(env_, ep, step):
             env_.render()
             time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
+            return _mjviewer_is_running(env_)
     else:
         env = make_eval_env(cfg.task)
 

@@ -89,7 +89,9 @@ def rollout_policy(
 ):
     """extra_obs_fn: 합성 obs 키 계산 콜백(예: stage_onehot). extra_obs_reset_fn: 에피소드
     시작마다 그 콜백의 내부 상태를 초기화(예: OnlineStageTracker.reset()). on_episode_step:
-    디버깅/시각화용 훅(env, episode_idx, step) — 화면 렌더 등에 사용, 로직에 영향 없음.
+    디버깅/시각화용 훅(env, episode_idx, step) — 화면 렌더 등에 사용. False를 반환하면 rollout
+    전체를 그 자리에서 깨끗이 중단한다(예: render 창에서 ESC/닫기 감지 — Ctrl+C만으로는
+    MuJoCo GL 컨텍스트가 지저분하게 남을 때가 있어서 추가함, 2026-07-29).
 
     save_trajectory_keys: None이면 기존과 동일(집계만 반환). 키 목록(예: ["object",
     "robot0_gripper_qpos","robot1_gripper_qpos"])을 주면 에피소드별 (T, ...) 배열로 저장해
@@ -142,14 +144,16 @@ def rollout_policy(
     successes = []
     episodes = []
     trajectories = [] if save_trajectory_keys is not None else None
+    interrupted = False
 
     for ep in range(num_episodes):
         obs_raw = env.reset()
         if extra_obs_reset_fn is not None:
             extra_obs_reset_fn()
         obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
-        if on_episode_step is not None:
-            on_episode_step(env, ep, 0)
+        if on_episode_step is not None and on_episode_step(env, ep, 0) is False:
+            interrupted = True
+            break
         ep_log = {k: [np.asarray(obs_raw[k], dtype=np.float32)] for k in save_trajectory_keys} \
             if save_trajectory_keys is not None else None
 
@@ -170,16 +174,18 @@ def rollout_policy(
                 if ep_log is not None:
                     for k in save_trajectory_keys:
                         ep_log[k].append(np.asarray(obs_raw[k], dtype=np.float32))
-                if on_episode_step is not None:
-                    on_episode_step(env, ep, step_count)
+                # on_episode_step may return False to request an early, clean stop (e.g. ESC/window
+                # close on the render viewer) -- Ctrl+C alone can leave the MuJoCo GL context stuck.
+                if on_episode_step is not None and on_episode_step(env, ep, step_count) is False:
+                    interrupted = True
 
                 if env.is_success()["task"]:
                     success = True
 
-                if success or done or step_count >= max_steps:
+                if success or done or interrupted or step_count >= max_steps:
                     break
 
-            if success or step_count >= max_steps:
+            if success or interrupted or step_count >= max_steps:
                 break
 
         successes.append(success)
@@ -191,12 +197,15 @@ def rollout_policy(
                 "success": success,
                 **{k: np.stack(v) for k, v in ep_log.items()},
             })
+        if interrupted:
+            break
 
     metrics = {
-        "success_rate": float(np.mean(successes)),
-        "num_episodes": num_episodes,
+        "success_rate": float(np.mean(successes)) if successes else 0.0,
+        "num_episodes": len(successes),
         "num_successes": int(np.sum(successes)),
         "episodes": episodes,
+        "interrupted": interrupted,
     }
     if trajectories is not None:
         metrics["trajectories"] = trajectories
