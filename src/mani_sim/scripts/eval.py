@@ -57,10 +57,13 @@ def _patch_mjviewer_esc_quit():
     def _update_with_esc(self):
         if self.viewer is None:
             self._esc_pressed = False
+            self._enter_pressed = False
 
             def _key_callback(keycode):
                 if keycode == 256:  # GLFW_KEY_ESCAPE
                     self._esc_pressed = True
+                elif keycode in (257, 335):  # GLFW_KEY_ENTER, GLFW_KEY_KP_ENTER
+                    self._enter_pressed = True
 
             self.viewer = mj_viewer.launch_passive(
                 self.env.sim.model._model, self.env.sim.data._data,
@@ -96,6 +99,18 @@ def _mjviewer_is_running(env) -> bool:
     if getattr(renderer, "_esc_pressed", False):
         return False
     return handle.is_running()
+
+
+def _mjviewer_skip_requested(env) -> bool:
+    """render=true 루프에서 매 스텝(메인 스레드에서) 호출 -- Enter 키가 눌렸으면 True를
+    반환하고 플래그를 바로 소비(리셋)한다(다음 에피소드까지 계속 True로 남지 않게). 사람이
+    보다가 이미 실패라고 판단했을 때 max_steps 타임아웃까지 안 기다리고 다음 에피소드로
+    넘어가기 위한 용도(2026-07-30)."""
+    renderer = getattr(getattr(env, "env", env), "viewer", None)
+    if getattr(renderer, "_enter_pressed", False):
+        renderer._enter_pressed = False
+        return True
+    return False
 
 
 def _apply_run_config(cfg):
@@ -193,6 +208,8 @@ def _run_dp_eval(cfg, device):
         def on_episode_step(env_, ep, step):
             env_.render()
             time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
+            if _mjviewer_skip_requested(env_):
+                return "skip"
             return _mjviewer_is_running(env_)
     elif cfg.save_gif and is_image_task(cfg.task):
         env = make_eval_env(cfg.task)
@@ -214,6 +231,8 @@ def _run_dp_eval(cfg, device):
         def on_episode_step(env_, ep, step):
             env_.render()
             time.sleep(0.03)  # 사람 눈으로 따라갈 수 있게 살짝 속도 조절
+            if _mjviewer_skip_requested(env_):
+                return "skip"
             return _mjviewer_is_running(env_)
     else:
         env = make_eval_env(cfg.task)
@@ -330,6 +349,12 @@ def _run_openvla_eval(cfg):
 
 @hydra.main(config_path="../configs", config_name="eval", version_base=None)
 def main(cfg: DictConfig):
+    # robosuite의 "Loading controller configuration..." 등 INFO 로그가 매 env.reset()마다
+    # 두 줄씩 찍힌다(robosuite 자체 콘솔 핸들러 + "robosuite_logs" 로거가 propagate=False를
+    # 안 걸어놔서 Hydra root logger로도 전파돼 다시 한 번 포맷팅됨) - render로 지켜볼 때
+    # "ep N: steps=... success=..." 줄이 이 노이즈에 묻혀서 WARNING 이상만 남긴다(2026-07-30).
+    logging.getLogger("robosuite_logs").setLevel(logging.WARNING)
+
     cfg = _apply_run_config(cfg)
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 

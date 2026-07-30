@@ -91,7 +91,10 @@ def rollout_policy(
     시작마다 그 콜백의 내부 상태를 초기화(예: OnlineStageTracker.reset()). on_episode_step:
     디버깅/시각화용 훅(env, episode_idx, step) — 화면 렌더 등에 사용. False를 반환하면 rollout
     전체를 그 자리에서 깨끗이 중단한다(예: render 창에서 ESC/닫기 감지 — Ctrl+C만으로는
-    MuJoCo GL 컨텍스트가 지저분하게 남을 때가 있어서 추가함, 2026-07-29).
+    MuJoCo GL 컨텍스트가 지저분하게 남을 때가 있어서 추가함, 2026-07-29). 문자열 "skip"을
+    반환하면 rollout 전체는 그대로 두고 **현재 에피소드만** 실패(success=False)로 즉시
+    종료하고 다음 에피소드로 넘어간다(예: render 창에서 Enter — 사람이 보다가 이미 실패라고
+    판단했을 때 max_steps 타임아웃까지 기다릴 필요 없게, 2026-07-30).
 
     save_trajectory_keys: None이면 기존과 동일(집계만 반환). 키 목록(예: ["object",
     "robot0_gripper_qpos","robot1_gripper_qpos"])을 주면 에피소드별 (T, ...) 배열로 저장해
@@ -151,15 +154,19 @@ def rollout_policy(
         if extra_obs_reset_fn is not None:
             extra_obs_reset_fn()
         obs_history = deque([obs_raw] * obs_horizon, maxlen=obs_horizon)
-        if on_episode_step is not None and on_episode_step(env, ep, 0) is False:
+        skip = False
+        step0_signal = on_episode_step(env, ep, 0) if on_episode_step is not None else None
+        if step0_signal is False:
             interrupted = True
             break
+        elif step0_signal == "skip":
+            skip = True
         ep_log = {k: [np.asarray(obs_raw[k], dtype=np.float32)] for k in save_trajectory_keys} \
             if save_trajectory_keys is not None else None
 
         success = False
         step_count = 0
-        while step_count < max_steps:
+        while not skip and step_count < max_steps:
             obs_batch = _build_obs_batch(obs_history, obs_keys, rgb_keys, normalizer, device, extra_obs_fn)
 
             with torch.no_grad():
@@ -174,18 +181,24 @@ def rollout_policy(
                 if ep_log is not None:
                     for k in save_trajectory_keys:
                         ep_log[k].append(np.asarray(obs_raw[k], dtype=np.float32))
-                # on_episode_step may return False to request an early, clean stop (e.g. ESC/window
-                # close on the render viewer) -- Ctrl+C alone can leave the MuJoCo GL context stuck.
-                if on_episode_step is not None and on_episode_step(env, ep, step_count) is False:
+                # on_episode_step may return False to request an early, clean stop for the whole
+                # rollout (e.g. ESC/window close -- Ctrl+C alone can leave the MuJoCo GL context
+                # stuck), or "skip" to abandon just this episode as a failure and move to the next
+                # (e.g. Enter key -- for when a human watching render=true can already tell it's
+                # failed and doesn't want to wait out max_steps).
+                step_signal = on_episode_step(env, ep, step_count) if on_episode_step is not None else None
+                if step_signal is False:
                     interrupted = True
+                elif step_signal == "skip":
+                    skip = True
 
                 if env.is_success()["task"]:
                     success = True
 
-                if success or done or interrupted or step_count >= max_steps:
+                if success or done or interrupted or skip or step_count >= max_steps:
                     break
 
-            if success or interrupted or step_count >= max_steps:
+            if success or interrupted or skip or step_count >= max_steps:
                 break
 
         successes.append(success)
