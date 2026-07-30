@@ -33,7 +33,7 @@ log_every: 50
 ckpt_every_epochs: 25
 # eval_every_epochs<=0 이면 학습 중 rollout 평가 생략(예: 빠른 스모크).
 eval_every_epochs: 50
-eval_episodes: 20
+eval_episodes: 10  # 2026-07-30: 20->10, round1 재학습 중간점검 비용 절감 목적으로 기본값 변경.
 # round.yaml의 eval.max_steps는 이미 1000(2026-07-27, base policy 200회 실측 - 성공 에피소드
 # 평균 길이 466, 범위 382~780 - 근거로 수정됨, EXP-10.md 참고)인데 여긴 그때 같이 안 고쳐져서
 # 300으로 남아있었음(2026-07-29 발견 - Transport 200demo 재학습 중 eval이 매번 handoff 완료
