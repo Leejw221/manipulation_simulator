@@ -352,7 +352,12 @@ def main(cfg: DictConfig):
     # robosuite의 "Loading controller configuration..." 등 INFO 로그가 매 env.reset()마다
     # 두 줄씩 찍힌다(robosuite 자체 콘솔 핸들러 + "robosuite_logs" 로거가 propagate=False를
     # 안 걸어놔서 Hydra root logger로도 전파돼 다시 한 번 포맷팅됨) - render로 지켜볼 때
-    # "ep N: steps=... success=..." 줄이 이 노이즈에 묻혀서 WARNING 이상만 남긴다(2026-07-30).
+    # "ep N: steps=... success=..." 줄이 이 노이즈에 묻힌다. robosuite는 여기서 아직 import된
+    # 적 없고(make_eval_env 안에서 지연 import) robosuite.utils.log_utils가 모듈 임포트
+    # 시점에 이 로거를 강제로 INFO로 설정해버리므로, 여기서 미리 setLevel해봐야 나중에
+    # robosuite가 로드되며 도로 INFO로 덮어써진다(2026-07-30 첫 시도 때 실측 확인된 버그) -
+    # 그래서 robosuite를 먼저 import해 그 초기화를 끝내놓고 나서 눌러야 한다.
+    import robosuite  # noqa: F401 - 아래 setLevel이 덮어써지지 않게 먼저 초기화만 시킨다.
     logging.getLogger("robosuite_logs").setLevel(logging.WARNING)
 
     cfg = _apply_run_config(cfg)
