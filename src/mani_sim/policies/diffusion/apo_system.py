@@ -57,7 +57,8 @@ class ApoSystem:
                  preference_frames, init_state_dict=None, reference_ema_enabled=False,
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
-                 bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4):
+                 bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
+                 action_error_source="noise_mse"):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -104,6 +105,18 @@ class ApoSystem:
 
         assert z0_method in ("match", "mismatch"), f"z0_method={z0_method!r} 미지원"
         self.z0_method = z0_method
+
+        # action_error_source: weighting(action_error 축)에 넘길 "오차"의 정의.
+        #   "noise_mse"(기존 기본값) — 노이즈 예측 MSE. reward와 같은 양을 재사용.
+        #   "x0_l1"(APO 원문 충실) — 노이즈 예측에서 복원한 액션(x0)의 GT 대비 L1.
+        # 원문은 reward(토큰 log확률)와 weight(디코딩된 연속 액션 L1)를 의도적으로 다른 양으로
+        # 쓴다(논문 4.2절) — compute_loss의 해당 분기 주석 참고. 2026-07-30~31 실측으로
+        # "노이즈 예측 MSE는 실제 액션 품질을 대변하지 못한다"가 확인됐으므로(EXP-10.md),
+        # x0_l1이 원문 의도에 맞는 선택이다. 기존 런 재현성을 위해 기본값은 noise_mse 유지.
+        assert action_error_source in ("noise_mse", "x0_l1"), \
+            f"action_error_source={action_error_source!r} 미지원"
+        self.action_error_source = action_error_source
+        self.last_action_error = 0.0
 
         self.reference_ema_enabled = reference_ema_enabled
         self.reference_ema_momentum = reference_ema_momentum
@@ -201,8 +214,30 @@ class ApoSystem:
                     ).sum(dim=1)
 
         if self.weighting is not None:
-            error = (model_mse.detach() * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
+            if self.action_error_source == "x0_l1":
+                # APO 원문은 adaptive weight를 reward와 **다른 양**으로 계산한다: reward는
+                # 토큰 log확률 비지만, weight는 토큰을 연속 액션으로 디코딩한 뒤의 L1 오차다
+                # (`ddp_robotic_trainer.py:276-295`의 decode_token_ids_to_actions →
+                # true/false_action_l1_loss). 논문 4.2절이 이유를 명시 — "to bridge the gap
+                # between token classification and continuous action regression", 즉 reward에
+                # 쓰는 양이 실제 액션 오차를 반영하지 못하기 때문이다[검증-원문, 2026-07-31].
+                # diffusion에서 이에 대응하는 연산은 노이즈 예측으로부터 깨끗한 액션을 복원하는
+                # 것: x0 = (x_t - sqrt(1-abar)*eps_pred)/sqrt(abar). 추가 forward 없이 이미
+                # 계산된 값으로 구해진다.
+                abar = scheduler.alphas_cumprod.to(device)[timesteps].view(-1, 1, 1)
+                x0_pred = (noisy - (1 - abar).sqrt() * pred.detach()) / abar.sqrt()
+                # 고-노이즈 timestep에서는 sqrt(abar)가 0에 가까워 위 복원이 폭주한다(스모크
+                # 테스트 실측: clamp 없이 평균 오차 112 vs noise_mse의 1.19). 그러면 가중치가
+                # "어떤 샘플이 어려운가"가 아니라 "어떤 timestep이 뽑혔나"에 좌우돼 무의미해진다.
+                # 정책의 inference_scheduler가 clip_sample=True로 매 스텝 x0을 [-1,1]로 자르므로
+                # (액션은 MinMax로 [-1,1] 정규화됨) 동일한 clamp를 적용해 범위를 맞춘다.
+                x0_pred = x0_pred.clamp(-1.0, 1.0)
+                x0_l1 = (x0_pred - action).abs().mean(dim=-1)  # (B, Tp)
+                error = (x0_l1 * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
+            else:
+                error = (model_mse.detach() * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
             weight = self.weighting.compute_weights(action_mode, error=error)  # (B, Tp)
+            self.last_action_error = float(error.mean().item())
         else:
             weight = torch.ones_like(model_mse)
 
@@ -270,4 +305,5 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         ars_enabled=sys_cfg.get("ars_enabled", False),
         ars_k1=sys_cfg.get("ars_k1", 1.0),
         ars_eps=sys_cfg.get("ars_eps", 1e-4),
+        action_error_source=sys_cfg.get("action_error_source", "noise_mse"),
     )
