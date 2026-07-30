@@ -29,7 +29,7 @@ collect:
   control_fps: 20
   # SIRIUS·APO 두 조건이 라운드당 같은 데이터량을 모으도록 통제(2026-07-27, collect.yaml의
   # 동일 필드 설명 참고 — demo 비율 역산). null이면 num_episodes 상한만으로 종료.
-  round_size_ratio: null
+  round_size_ratio: 1.5
 
 # 매 라운드 train 설정 — round0..현재까지 누적 데이터로 매번 처음부터 재학습(SIRIUS/APO 관례).
 # num_epochs/batch_size는 base policy 학습값(task#41: demo20, 134epoch, batch64)과 반드시

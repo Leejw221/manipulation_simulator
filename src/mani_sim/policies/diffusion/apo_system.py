@@ -38,13 +38,26 @@ from mani_sim.factory import registry
 from mani_sim.losses.apo_loss import APOKTOLoss
 from mani_sim.networks.lora import apply_lora
 
+# OSC_POSE 컨벤션(각 팔 7dim=[dx,dy,dz,drx,dry,drz,gripper])에서 각 블록의 마지막 차원이
+# gripper다. Square(7)/Transport(14) 전제 — 다른 액션 레이아웃(예: piper joint-space)엔 안 맞음.
+_ARM_ACTION_DIM = 7
+
+
+def _gripper_free_mask(action_dim, device):
+    """(action_dim,) bool — gripper 차원만 False. APO Appendix C: undesirable(reject) reward
+    계산에서 gripper를 빼기 위해 씀 — gripper는 desirable/undesirable 무관하게 열림/닫힘을
+    오래 유지하는 게 정상이라, 그대로 두면 reject 항이 정상적인 유지 동작까지 밀어낸다."""
+    mask = torch.ones(action_dim, dtype=torch.bool, device=device)
+    mask[_ARM_ACTION_DIM - 1::_ARM_ACTION_DIM] = False
+    return mask
+
 
 class ApoSystem:
     def __init__(self, policy, weighting, beta, desirable_weight, undesirable_weight,
                  preference_frames, init_state_dict=None, reference_ema_enabled=False,
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
-                 bc_aux_weight=0.0):
+                 bc_aux_weight=0.0, z0_method="match"):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -60,7 +73,15 @@ class ApoSystem:
         LoRA(r=lora_rank)로 래핑, 나머지는 전부 freeze. reference는 LoRA 적용 *전* 상태를
         복제하므로 자동으로 "순수 base 가중치"가 된다(APO 공식 코드의
         `reference_model.disable_adapters()`와 수학적으로 동일 — LoRA는 가산적이라
-        adapter 없는 forward와 base-only 복제본은 항상 같은 출력을 낸다)."""
+        adapter 없는 forward와 base-only 복제본은 항상 같은 출력을 낸다).
+
+        z0_method(기본 "match"): z0(KL anchor) 추정 방식 — "match"(같은 인덱스, 셔플 없이
+        배치 reward 평균) | "mismatch"(state는 그대로 두고 action만 다른 샘플 것으로 섞은
+        pair로 추정, KTO 원문 방식). diffusion-kto 공식 코드(`jacklishufan/diffusion-kto`,
+        `train_kto_sd_v1.5.py`)의 `--bce_offset` argparse 기본값은 "none"(=match)이고, 논문
+        결과를 낸 `exps/example.sh`도 이 플래그를 안 넘겨 기본값 그대로 씀[검증-코드,
+        2026-07-30] — mismatch는 U-Net을 2회 더 돌려야 해서 SD 규모에선 비쌌을 것으로 추정.
+        우리 UNet은 작아 두 방식 다 실험 대상(EXP-10.md 2026-07-30 절)."""
         if init_state_dict is not None:
             policy.load_state_dict(init_state_dict)
 
@@ -75,6 +96,9 @@ class ApoSystem:
             for p in policy.parameters():
                 p.requires_grad_(False)
             apply_lora(policy.unet, rank=lora_rank, alpha=lora_alpha)
+
+        assert z0_method in ("match", "mismatch"), f"z0_method={z0_method!r} 미지원"
+        self.z0_method = z0_method
 
         self.reference_ema_enabled = reference_ema_enabled
         self.reference_ema_momentum = reference_ema_momentum
@@ -127,37 +151,48 @@ class ApoSystem:
         noisy = scheduler.add_noise(action, noise, timesteps)
 
         pred = policy.unet(noisy, timesteps, cond)
-        model_mse = F.mse_loss(pred, noise, reduction="none").mean(dim=-1)  # (B, Tp)
+        sq_err = F.mse_loss(pred, noise, reduction="none")  # (B, Tp, Da)
+        model_mse = sq_err.mean(dim=-1)  # (B, Tp)
         with torch.no_grad():
             ref_cond = self.reference.get_global_cond(obs)
             ref_pred = self.reference.unet(noisy, timesteps, ref_cond)
-        ref_mse = F.mse_loss(ref_pred, noise, reduction="none").mean(dim=-1)
+        ref_sq_err = F.mse_loss(ref_pred, noise, reduction="none")
+        ref_mse = ref_sq_err.mean(dim=-1)
+
+        # gripper 제외 MSE(APO Appendix C) — undesirable(reject) reward 전용, chosen/z0/
+        # weighting은 전체 액션(gripper 포함) 그대로 씀. gripper_free_mask=_gripper_free_mask
+        # 참고(OSC_POSE 7dim/팔 컨벤션, Square/Transport 전제).
+        gripper_free = _gripper_free_mask(sq_err.shape[-1], device)
+        model_mse_ng = sq_err[..., gripper_free].mean(dim=-1)  # (B, Tp)
+        ref_mse_ng = ref_sq_err[..., gripper_free].mean(dim=-1)
 
         mask = action_mask.float()
 
-        # z0(KL anchor) — KTO 원문 방식: 배치 자기 자신의 (state,action) reward가 아니라
-        # state는 그대로 두고 action만 다른 샘플 것으로 섞은 mismatched pair로 별도 추정한다
-        # (KTO paper Implementation 절 "matching inputs x′ with unrelated outputs yU′",
-        # APO 원문 코드의 `mismatch_label` 확인, 2026-07-29). 안 그러면 z0=mean(chosen,rejected)
-        # 라 rejected를 세게 밀어내기만 해도 z0가 같이 낮아져 chosen의 절대 품질 개선 없이
-        # sigmoid 조건을 만족시키는 loophole이 생긴다 — 1~9차 전부 이 방식(버그)으로 학습됨.
-        # KL 항은 역전파 안 함(원문 "we do not back-propagate through the KL term").
-        with torch.no_grad():
-            mismatch_reward = None
-            if B > 1:
-                perm = torch.randperm(B, device=device)
-                if (perm == torch.arange(B, device=device)).all():
-                    perm = torch.roll(perm, 1)
-                mismatch_action = action[perm]
-                mismatch_mask = mask * mask[perm]
-                mismatch_noisy = scheduler.add_noise(mismatch_action, noise, timesteps)
-                mismatch_pred = policy.unet(mismatch_noisy, timesteps, cond)
-                mismatch_model_mse = F.mse_loss(mismatch_pred, noise, reduction="none").mean(dim=-1)
-                mismatch_ref_pred = self.reference.unet(mismatch_noisy, timesteps, ref_cond)
-                mismatch_ref_mse = F.mse_loss(mismatch_ref_pred, noise, reduction="none").mean(dim=-1)
-                mismatch_reward = (-mismatch_model_mse * mismatch_mask).sum(dim=1) - (
-                    -mismatch_ref_mse * mismatch_mask
-                ).sum(dim=1)
+        # z0(KL anchor) — z0_method="mismatch"면 KTO 원문 방식(state는 그대로 두고 action만
+        # 다른 샘플 것으로 섞은 mismatched pair로 별도 추정, KTO paper Implementation 절
+        # "matching inputs x′ with unrelated outputs yU′", APO 원문 코드의 `mismatch_label`
+        # 확인, 2026-07-29). "match"(기본, 2026-07-30)면 diffusion-kto 공식 코드
+        # (`train_kto_sd_v1.5.py`) 기본값(`--bce_offset=none`)과 동일하게 셔플 없이 배치
+        # reward 평균을 씀(APOKTOLoss.compute의 mismatch_reward=None 분기) — 자세한 트레이드오프는
+        # apo_system.py 모듈 docstring/EXP-10.md 2026-07-30 절 참고.
+        # mismatch일 땐 KL 항 역전파 안 함(원문 "we do not back-propagate through the KL term").
+        mismatch_reward = None
+        if self.z0_method == "mismatch":
+            with torch.no_grad():
+                if B > 1:
+                    perm = torch.randperm(B, device=device)
+                    if (perm == torch.arange(B, device=device)).all():
+                        perm = torch.roll(perm, 1)
+                    mismatch_action = action[perm]
+                    mismatch_mask = mask * mask[perm]
+                    mismatch_noisy = scheduler.add_noise(mismatch_action, noise, timesteps)
+                    mismatch_pred = policy.unet(mismatch_noisy, timesteps, cond)
+                    mismatch_model_mse = F.mse_loss(mismatch_pred, noise, reduction="none").mean(dim=-1)
+                    mismatch_ref_pred = self.reference.unet(mismatch_noisy, timesteps, ref_cond)
+                    mismatch_ref_mse = F.mse_loss(mismatch_ref_pred, noise, reduction="none").mean(dim=-1)
+                    mismatch_reward = (-mismatch_model_mse * mismatch_mask).sum(dim=1) - (
+                        -mismatch_ref_mse * mismatch_mask
+                    ).sum(dim=1)
 
         if self.weighting is not None:
             error = (model_mse.detach() * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
@@ -169,8 +204,11 @@ class ApoSystem:
         # 동일하게 적용하니 reward=차이 계산에서 마스킹 효과가 상쇄되지 않고 그대로 남는다).
         log_probs = -model_mse * mask
         ref_log_probs = -ref_mse * mask
+        log_probs_reject = -model_mse_ng * mask
+        ref_log_probs_reject = -ref_mse_ng * mask
         total_loss, metrics = self.kto_loss.compute(
-            log_probs, ref_log_probs, weight, action_mode, mismatch_reward=mismatch_reward
+            log_probs, ref_log_probs, weight, action_mode, mismatch_reward=mismatch_reward,
+            log_probs_reject=log_probs_reject, ref_log_probs_reject=ref_log_probs_reject,
         )
 
         if self.bc_aux_weight > 0:
@@ -198,6 +236,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         z0_clamp_max=sys_cfg.get("z0_clamp_max", 50.0),
         use_lora=sys_cfg.get("use_lora", False),
         lora_rank=sys_cfg.get("lora_rank", 32),
-        lora_alpha=sys_cfg.get("lora_alpha", 32),
+        lora_alpha=sys_cfg.get("lora_alpha", 16),
         bc_aux_weight=sys_cfg.get("bc_aux_weight", 0.0),
+        z0_method=sys_cfg.get("z0_method", "match"),
     )

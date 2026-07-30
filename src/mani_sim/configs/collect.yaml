@@ -35,7 +35,7 @@ num_episodes: 5            # round_size_ratio를 쓸 때도 안전 상한으로 
 # 종료된다 — SIRIUS 가중치 공식이 요구하는 "합친 데이터셋에서 demo 비율 < ~50%"를 역산한
 # 값(1.5배 → demo 비율 40%, moai_policy 실물 Piper rollout_intervention.py와 동일 계산식
 # 이식, 2026-07-27). demo 프레임 수는 task.filter_key가 있으면 그 부분집합 기준.
-round_size_ratio: null
+round_size_ratio: 1.5
 max_steps: null            # null=상한 없음. 성공/env done/종료키까지 진행 (배포 수집 기본)
 save: true                 # false면 마지막 저장 단계를 건너뜀 - 정책+개입이 제대로 도는지만
                             # 확인해볼 때(예: round.py로 실제 배포 라운드 돌리기 전 사전 점검).

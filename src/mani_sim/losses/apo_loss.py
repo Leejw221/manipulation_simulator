@@ -1,10 +1,14 @@
 """시스템 축 — apo (reference 모델 + KTO 앵커 필요).
 
 원문 대조: GeWu-Lab/Action-Preference-Optimization trainer/ddp_robotic_trainer.py
-APOTrainer.loss()/get_batch_metrics() (L173-364) [검증-원문, 2026-07-16]. z0(anchor) 추정은
-mismatch pair 대신 batch reward 평균을 쓴다(우리 reward가 노이즈예측 MSE 차이라 가능,
-Diffusion-KTO와 동일 방식). clamp 범위는 APO 원문 방식(대칭, 음수 허용) — 상세 근거는
-EXP-10.md "z0 clamp" 절 참고.
+APOTrainer.loss()/get_batch_metrics() (L173-364) [검증-원문, 2026-07-16]. z0(anchor) 추정
+방식은 apo_system.py의 z0_method로 토글(match=배치 reward 평균 | mismatch=교차매칭) — 근거는
+apo_system.py 모듈 docstring 및 EXP-10.md 2026-07-30 절 참고. clamp 범위는 APO 원문 방식
+(대칭, 음수 허용) — 상세 근거는 EXP-10.md "z0 clamp" 절 참고.
+
+undesirable(reject) reward는 chosen/z0와 다른 입력(log_probs_reject/ref_log_probs_reject,
+gripper 제외)을 받을 수 있다 — APO Appendix C의 gripper 마스킹, apo_system.py에서 계산해
+넘겨준다.
 
 SIRIUS와의 결정적 차이: **reference 모델(정책의 이전 상태, 고정)이 필요**하다 — reward를
 "GT action을 policy가 reference보다 얼마나 더 그럴듯하다고 보는가"(log-ratio)로 정의하고,
@@ -48,16 +52,24 @@ class APOKTOLoss:
         self.z0_clamp_min = z0_clamp_min
         self.z0_clamp_max = z0_clamp_max
 
-    def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None):
+    def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None,
+                log_probs_reject=None, ref_log_probs_reject=None):
         """log_probs, ref_log_probs, weight: (B, T) — 패딩 프레임은 호출부가 미리 0으로
         마스킹해서 넘긴다(합산에서 자동 제외). action_mode_window: (B, W), W>=preference_frames.
-        mismatch_reward: (B,) 또는 None — KTO/APO 원문 방식의 mismatched-pair reward(호출부가
-        계산해서 넘김). 주어지면 z0를 여기서 추정(원문 그대로), None이면 구버전 호환으로
-        matched reward의 배치 평균을 씀(EXP-10.md "z0 mismatched pair" 절 — 이게 버그였음).
+        mismatch_reward: (B,) 또는 None — z0_method="mismatch"일 때 호출부(apo_system.py)가
+        계산해서 넘김. 주어지면 z0를 여기서 추정, None이면 z0_method="match"로 배치 reward
+        평균을 씀(diffusion-kto 공식 코드 기본값과 동일 — 근거는 apo_system.py 참고, 더 이상
+        버그가 아니라 명시적으로 선택 가능한 옵션이다, 2026-07-30).
+        log_probs_reject/ref_log_probs_reject: (B, T) 또는 None — undesirable(reject) reward
+        전용 입력(APO Appendix C, gripper 제외). None이면 log_probs/ref_log_probs를 그대로 씀.
 
         반환: (scalar loss, dict 진단 지표).
         """
         reward = log_probs.sum(dim=1) - ref_log_probs.sum(dim=1)  # (B,)
+        if log_probs_reject is not None:
+            reward_reject = log_probs_reject.sum(dim=1) - ref_log_probs_reject.sum(dim=1)
+        else:
+            reward_reject = reward
         z0_source = mismatch_reward if mismatch_reward is not None else reward
         # 대칭 clamp(APO 원문 방식) — 근거: EXP-10.md "z0 clamp" 절.
         z0 = z0_source.detach().mean().clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
@@ -79,7 +91,7 @@ class APOKTOLoss:
         # n_rejected로만 결정된다.
         chosen_weight = chosen_weight_raw / max(chosen_weight_sum, 1e-8) * n_chosen if n_chosen else chosen_weight_raw
 
-        rejected_reward = reward[~mask]
+        rejected_reward = reward_reject[~mask]
         rejected_losses = self.undesirable_weight * (1 - torch.sigmoid(self.beta * (z0 - rejected_reward)))
         rejected_weight_raw = sample_weight[~mask]
         rejected_weight_sum = float(rejected_weight_raw.sum().item()) if n_rejected else 0.0
