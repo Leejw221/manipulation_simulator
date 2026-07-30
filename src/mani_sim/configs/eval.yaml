@@ -12,7 +12,10 @@ checkpoint_path: ???
 # 옛 체크포인트(run_config.yaml 없음)나 openvla는 자동으로 건너뛰고 위 CLI 값을 그대로 씀.
 use_run_config: true
 num_episodes: 50
-max_steps: 300
+# round.yaml의 eval.max_steps=1000과 맞춤(2026-07-29) - 300은 Transport 성공 에피소드
+# 평균 길이(466, 범위 382~780)보다 짧아 완료 직전에 타임아웃 처리되는 문제가 있었음
+# (train.yaml의 eval_max_steps 주석·EXP-10.md 참고).
+max_steps: 1000
 render: false
 device: cuda
 # render=true + image task일 때만 적용(성공률 측정용 render=false 호출은 이 값과 무관하게
