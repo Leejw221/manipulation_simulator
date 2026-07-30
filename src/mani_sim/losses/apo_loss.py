@@ -11,16 +11,32 @@ gripper 제외)을 받을 수 있다 — APO Appendix C의 gripper 마스킹, ap
 넘겨준다.
 
 **ARS(Adaptive Rejection Scaling, 2026-07-30 추가, [적응])**: arXiv:2511.19049("Beyond Reward
-Margin: Rethinking and Resolving Likelihood Displacement in Diffusion Models")가 보고하는
-현상 — DPO/KTO류 loss가 rejected를 밀어낼 때, chosen과 NTK 유사도가 높은(=구별하기 어려운)
-rejected 샘플일수록 그 gradient가 chosen 쪽으로 "번져서"(spillover) chosen 품질 자체를
-깎아먹는다(그 논문 자체는 diffusion 전용 현상이 아니라 LLM DPO에서도 보고된 일반 현상이라고
-명시함). 원문의 fix(Adaptive Rejection Scaling)는 reward margin이 작을 때(=구별 어려움)
-rejected의 loss 기여를 줄이는 것 — 우리 KTO는 pair가 아니라 margin 개념이 없어서, z0를
-기준점 삼아 `margin_i = z0 - reward_rejected_i`(클수록 그 rejected 샘플이 z0보다 명확하게
-나쁨 = 안전)로 근사하고 `ars_scale_i = sigmoid(margin_i / ars_temperature)`(작을수록/음수일수록
-축소)를 rejected loss에 곱한다. 원문 정확한 수식이 아니라 같은 메커니즘의 근사 구현
-— ars_temperature 튜닝 필요.
+Margin: Rethinking and Resolving Likelihood Displacement in Diffusion Models", ICLR 2026)가
+보고하는 현상 — DPO류 loss가 rejected를 밀어낼 때, chosen과 NTK 유사도가 높은(=구별하기
+어려운) rejected 샘플일수록 그 gradient가 chosen 쪽으로 "번져서"(spillover) chosen 품질
+자체를 깎아먹는다(그 논문 자체는 diffusion 전용 현상이 아니라 LLM DPO에서도 보고된 일반
+현상이라고 명시함).
+
+원문 수식(PG-DPO, Eq.7, [검증-원문 2026-07-30 WebFetch로 직접 확인]):
+`α(x_w,x_l) = σ[K1·(r_w-r_l)/(r_l+ε)]` — **짝지어진(paired)** chosen reward r_w와 rejected
+reward r_l의 차이를, r_l 크기로 정규화한 비율에 sigmoid. Eq.9의 DPO 단일 sigmoid 안에서
+rejected 항에 곱해짐.
+
+**우리 KTO(unpaired)로의 이식, 두 가지 필연적 이탈 — 둘 다 원문을 그대로 못 쓰는 이유가
+분명함(문헌 검색 확인, 2026-07-30) — KTO(unpaired) + 이 안전장치를 결합한 선행 사례
+자체가 없음(ELBO-KTO는 diffusion LLM 텍스트 전용이고 이 안전장치를 안 다룸, ACPO도
+DPO/paired 기반)**:
+1. **r_w 대체**: pair가 없어 "이 rejected에 대응하는 chosen"이 없다 — 배치 앵커 z0를
+   대신 씀: `margin_i = z0 - reward_rejected_i`.
+2. **정규화 부호 안전장치**: 원문은 `r_l+ε`로 나누는데(원문 도메인은 r_l이 대체로 양수인
+   듯), 우리 reward_rejected는 부호가 자주 바뀐다(round1 실측: -2.2~+0.66대) — `r_l+ε`
+   그대로 쓰면 0 근처에서 비율이 튀거나 부호가 뒤집힌다. `|r_l|+ε`(절대값)로 바꿔 이 문제를
+   피함 — 이 지점만 원문과 다른 우리 쪽 안전장치.
+
+최종: `ars_scale_i = sigmoid(K1 · margin_i.detach() / (|reward_rejected_i.detach()|+ε))`을
+KTO의 (원문과 달리 이미 분리된) rejected sigmoid 항 바깥에 곱한다 — DPO의 단일 공유
+sigmoid 구조가 아니라 KTO의 독립된 두 항 구조라 적용 위치도 원문과 다름. 원문의 γ(모드
+전환) 항은 이번엔 구현 안 함.
 
 **동기**: 우리 undesirable(PREINTV) 샘플은 정의상 desirable(DEMO/ROLLOUT) 샘플 바로 직전
 프레임이라 시각적·운동학적으로 가장 가깝다 — 이 논문이 말하는 "spillover 최악 조건"에
@@ -61,7 +77,8 @@ class APOKTOLoss:
         z0_clamp_min=-50.0,
         z0_clamp_max=50.0,
         ars_enabled=False,
-        ars_temperature=1.0,
+        ars_k1=1.0,
+        ars_eps=1e-4,
     ):
         self.beta = beta
         self.desirable_weight = desirable_weight
@@ -70,7 +87,8 @@ class APOKTOLoss:
         self.z0_clamp_min = z0_clamp_min
         self.z0_clamp_max = z0_clamp_max
         self.ars_enabled = ars_enabled
-        self.ars_temperature = ars_temperature
+        self.ars_k1 = ars_k1
+        self.ars_eps = ars_eps
 
     def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None,
                 log_probs_reject=None, ref_log_probs_reject=None):
@@ -114,9 +132,15 @@ class APOKTOLoss:
         rejected_reward = reward_reject[~mask]
         margin = z0 - rejected_reward  # 클수록(양수) 그 rejected 샘플이 z0보다 명확히 나쁨=안전
         if self.ars_enabled:
-            # stop-gradient(z0/margin 자체를 학습 신호로 안 씀, 순수 스케일 팩터) — chosen과
-            # 구별하기 어려운(margin 작음/음수) 샘플일수록 밀어내는 힘을 줄인다.
-            ars_scale = torch.sigmoid(margin.detach() / self.ars_temperature)
+            # PG-DPO 원문 Eq.7: sigmoid(K1·(r_w-r_l)/(r_l+eps)) — r_w를 z0로 대체(unpaired라
+            # 페어가 없음), 분모는 |r_l|+eps로 절대값(원문은 r_l+eps인데 우리 reward는 부호가
+            # 자주 바뀌어서 그대로 쓰면 0 근처에서 비율이 튀거나 부호가 뒤집힘 — 모듈
+            # docstring 참고). stop-gradient(순수 스케일 팩터, z0/margin/분모 전부 학습
+            # 신호로 안 씀) — chosen과 구별하기 어려운(margin 작음/음수) 샘플일수록 밀어내는
+            # 힘을 줄인다.
+            ars_scale = torch.sigmoid(
+                self.ars_k1 * margin.detach() / (rejected_reward.detach().abs() + self.ars_eps)
+            )
         else:
             ars_scale = torch.ones_like(rejected_reward)
         rejected_losses = self.undesirable_weight * ars_scale * (1 - torch.sigmoid(self.beta * margin))

@@ -129,7 +129,9 @@ system:
                        # DEMO/ROLLOUT(chosen) 바로 직전 프레임이라 정확히 이 최악 조건에
                        # 해당할 수 있다는 가설(round1 mismatch 붕괴 관측 이후). 근거: EXP-10.md
                        # 2026-07-30 저녁 절. losses/apo_loss.py 모듈 docstring 참고.
-  ars_temperature: 1.0  # sigmoid(margin/ars_temperature) 스케일 — beta처럼 실측 재조정 필요.
+  ars_k1: 1.0    # PG-DPO 원문 Eq.7의 K1(sigmoid 안 스케일). beta처럼 실측 재조정 필요.
+  ars_eps: 1.0e-4  # 원문 eps — 분모(|rejected_reward|) 0 나눗셈 방지용, action_error.py의
+                    # eps 관례와 동일 크기.
 
 # 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
 # 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의
