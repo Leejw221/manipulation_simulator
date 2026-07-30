@@ -28,13 +28,14 @@ task) / 키보드+Placo IK(Piper task, env_backend=piper_mujoco로 task.yaml이 
 """
 
 import logging
+import os
 
 import hydra
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from mani_sim.datasets.intervention_writer import read_env_args, write_intervention_hdf5
+from mani_sim.datasets.intervention_writer import read_env_args, read_intervention_hdf5, write_intervention_hdf5
 from mani_sim.datasets.labels import LABEL_INTV, LABEL_PREINTV
 from mani_sim.datasets.normalization import MinMaxNormalizer, compute_minmax_stats
 from mani_sim.factory import registry
@@ -337,8 +338,27 @@ def main(cfg: DictConfig):
 
     episodes = []
     i = 0
+    # 재개(resume) — output_path에 이전 수집분이 이미 있으면(같은 output_path로 재실행)
+    # 그걸 먼저 불러와 이어서 모은다. Piper task는 LeRobotDataset.resume()으로 별도 처리되므로
+    # (build_or_resume_dataset 경로) 여기선 robosuite(robomimic HDF5) task만 해당.
+    if cfg.save and not _is_piper_task(cfg) and os.path.exists(cfg.output_path):
+        episodes = read_intervention_hdf5(cfg.output_path, obs_keys)
+        i = len(episodes)
+        print(f"[재개] {cfg.output_path}에서 기존 에피소드 {i}개 로드")
+        if round_frame_threshold is not None:
+            for ep in episodes:
+                total_round_frames += len(ep["action_modes"])
+                total_intv_frames += int((ep["action_modes"] == LABEL_INTV).sum())
+            print(
+                f"  라운드 누적(재개분 포함): {total_round_frames}/{round_frame_threshold} 프레임 "
+                f"(intv 누적 {total_intv_frames})"
+            )
+
     try:
         while i < cfg.num_episodes:
+            if round_frame_threshold is not None and total_round_frames >= round_frame_threshold:
+                print(f"[라운드 종료] 재개 시점에 이미 목표 프레임 달성 ({total_round_frames} >= {round_frame_threshold})")
+                break
             intervention.reset()
             if policy_kind == "robomimic":
                 policy.start_episode()  # 매 에피소드 RNN 은닉상태 리셋
@@ -413,6 +433,11 @@ def main(cfg: DictConfig):
             if getattr(intervention, "should_stop", lambda: False)():
                 print("세션 종료 요청 - 남은 에피소드는 건너뜁니다.")
                 break
+    except KeyboardInterrupt:
+        # Ctrl+C도 정상 종료처럼 처리 - 지금까지 모은 에피소드는 아래 저장 단계까지 그대로
+        # 진행한다(그냥 raise하면 finally 이후 저장 코드에 도달 못 해 전부 유실됨). 다음에
+        # 같은 output_path로 재실행하면 위 재개 로직이 이어서 수집한다.
+        print("\n[중단] Ctrl+C 감지 - 지금까지 모은 에피소드 저장 후 종료합니다.")
     finally:
         intervention.close()
         if _is_piper_task(cfg):

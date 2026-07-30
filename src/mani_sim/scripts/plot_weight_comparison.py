@@ -5,7 +5,7 @@ episode progress(%) 기준으로 비교 플롯. ablation 학습 결과 기다리
 사용:
     python -m mani_sim.scripts.plot_weight_comparison \
         --checkpoint outputs/train/transport_diffusion_seed0/policy_epoch500.pt \
-        --hdf5 data/transport_check/transport/ph/transport_image_v15.hdf5 \
+        --hdf5 data/robomimic/transport/transport/ph/transport_image_v15.hdf5 \
         --variance-npz outputs/weighting/transport_action_variance.npz \
         --output outputs/weighting/weight_comparison.png --stride 20
 """

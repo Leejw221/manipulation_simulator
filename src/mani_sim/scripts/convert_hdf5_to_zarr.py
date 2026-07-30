@@ -20,8 +20,8 @@ Zarr, 시뮬레이션은 robosuite"로 Square 200개 데모 학습을 실전 검
 num_workers=4로 OOM 없이 정상 진행 — mani_sim_status.md 참고).
 
 사용: python -m mani_sim.scripts.convert_hdf5_to_zarr task=transport_demo20 \
-    hdf5_path=outputs/intervention/transport_round0_cumulative.hdf5 \
-    zarr_path=outputs/intervention/transport_round0_cumulative.zarr
+    hdf5_path=data/intervention/transport_round0_cumulative.hdf5 \
+    zarr_path=data/intervention/transport_round0_cumulative.zarr
 (hdf5_path을 생략하면 task.hdf5_path을 그대로 쓴다 - 원본 robomimic 데이터셋 변환용.)
 """
 

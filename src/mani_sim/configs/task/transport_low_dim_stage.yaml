@@ -28,7 +28,7 @@ env_kwargs:
         input_ref_frame: world
         gripper:
           type: GRIP
-hdf5_path: data/transport_check/transport/ph/low_dim_v15.hdf5
+hdf5_path: data/robomimic/transport/transport/ph/low_dim_v15.hdf5
 # stage_onehot: label_stages.py(--task transport)가 hdf5에 미리 기록해둔 6-dim one-hot
 # (datasets/stage_labeler.py의 label_stages_transport: lid_present/lid_removed/
 # payload_approach/payload_handoff/payload_delivered). transport_low_dim.yaml과 이 필드 하나만

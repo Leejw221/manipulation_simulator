@@ -87,7 +87,7 @@ def main(cfg: DictConfig):
     # round_hdf5s를 데모로 미리 채워서 시작 - merge_rounds.py 자기 docstring의 "round0(데모)"
     # 컨벤션과 맞추기 위함(2026-07-27 발견한 gap: 예전엔 여기가 항상 빈 리스트로 시작해서
     # 누적 재학습에 원본 데모가 한 번도 안 들어갔음). round0_demo_hdf5는 extract_demo_subset.py
-    # 산출물(예: outputs/intervention/transport_demo20.hdf5) - null이면 예전처럼 라운드
+    # 산출물(예: data/intervention/transport_demo20.hdf5) - null이면 예전처럼 라운드
     # 수집분만으로 시작(데모 없는 task, 혹은 의도적으로 뺄 때).
     round_hdf5s = [cfg.round0_demo_hdf5] if cfg.get("round0_demo_hdf5", None) else []
     round_metrics = []

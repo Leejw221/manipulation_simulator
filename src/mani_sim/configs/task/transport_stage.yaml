@@ -28,7 +28,7 @@ env_kwargs:
         input_ref_frame: world
         gripper:
           type: GRIP
-hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
+hdf5_path: data/robomimic/transport/transport/ph/transport_image_v15.hdf5
 camera_names: [agentview, robot0_eye_in_hand, robot1_eye_in_hand]
 image_size: 84
 rgb_keys: [agentview_image, robot0_eye_in_hand_image, robot1_eye_in_hand_image]

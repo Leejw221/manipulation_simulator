@@ -10,7 +10,7 @@
 사용:
     python -m mani_sim.scripts.compute_action_variance \
         --checkpoint outputs/train/transport_diffusion_seed0/policy_epoch500.pt \
-        --hdf5 data/transport_check/transport/ph/transport_image_v15.hdf5 \
+        --hdf5 data/robomimic/transport/transport/ph/transport_image_v15.hdf5 \
         --output outputs/weighting/transport_action_variance.npz --stride 20 --num-samples 4
 """
 

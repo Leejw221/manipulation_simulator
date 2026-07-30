@@ -2,7 +2,7 @@
 # StageTransformer/SubtaskTransformer(policies/sarm/sarm_transformer.py) — xdofai/opensarm
 # 원문 아키텍처 그대로 포팅[검증-원문, 2026-07-22]. task/policy registry와 별개 —
 # reward model은 action을 안 만들어서 기존 policy 인터페이스에 안 맞음, 독립 config로 둔다.
-hdf5_path: data/transport_check/transport/ph/transport_image_v15.hdf5
+hdf5_path: data/robomimic/transport/transport/ph/transport_image_v15.hdf5
 image_key: agentview_image
 state_keys: [robot0_eef_pos, robot0_eef_quat, robot0_gripper_qpos, robot1_eef_pos, robot1_eef_quat, robot1_gripper_qpos]
 state_dims:

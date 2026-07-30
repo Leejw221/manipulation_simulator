@@ -8,7 +8,7 @@ progress를 미리 계산해 저장. lerobot의 compute_rabc_weights.py와 같�
 사용:
     python -m mani_sim.scripts.compute_sarm_progress \
         --checkpoint outputs/sarm/transport_v2/policy_epoch3.pt \
-        --hdf5 data/transport_check/transport/ph/transport_image_v15.hdf5 \
+        --hdf5 data/robomimic/transport/transport/ph/transport_image_v15.hdf5 \
         --output outputs/sarm/transport_v2/sarm_progress.npz
 """
 

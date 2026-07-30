@@ -3,8 +3,8 @@ outputs/label_square_stages.py를 대체(경로를 인자로 받게 일반화). 
 
 사용:
     python -m mani_sim.scripts.label_stages --task square --hdf5 data/robomimic/square/ph/v1.5/square/ph/square_image_v15.hdf5
-    python -m mani_sim.scripts.label_stages --task door_cabinet --hdf5 outputs/intervention/door_cabinet_round.hdf5
-    python -m mani_sim.scripts.label_stages --task transport --hdf5 data/transport_check/transport/ph/low_dim_v15.hdf5
+    python -m mani_sim.scripts.label_stages --task door_cabinet --hdf5 data/intervention/door_cabinet_round.hdf5
+    python -m mani_sim.scripts.label_stages --task transport --hdf5 data/robomimic/transport/transport/ph/low_dim_v15.hdf5
 """
 
 import argparse

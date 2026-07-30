@@ -33,6 +33,29 @@ def read_env_args(hdf5_path):
         return f["data"].attrs["env_args"]
 
 
+def read_intervention_hdf5(path, obs_keys):
+    """write_intervention_hdf5가 저장한 파일을 collect.py의 episodes 리스트 형태로 되읽는다
+    (재개용 — resume 시 이미 모은 에피소드를 메모리로 복원해 이어서 수집한다).
+
+    write_intervention_hdf5과 정확히 역연산: obs는 (T, ...) 스택 배열로 저장돼 있으므로
+    프레임별 dict 리스트로 풀어낸다.
+    """
+    episodes = []
+    with h5py.File(path, "r") as f:
+        demo_keys = sorted(f["data"].keys(), key=lambda k: int(k.split("_")[1]))
+        for key in demo_keys:
+            demo_grp = f["data"][key]
+            actions = np.asarray(demo_grp["actions"])
+            modes = np.asarray(demo_grp["action_mode"])
+            num_samples = actions.shape[0]
+            obs = [
+                {k: np.asarray(demo_grp["obs"][k][t]) for k in obs_keys}
+                for t in range(num_samples)
+            ]
+            episodes.append({"obs": obs, "actions": actions, "action_modes": modes})
+    return episodes
+
+
 def write_intervention_hdf5(path, episodes, obs_keys, env_args):
     """수집 에피소드 리스트를 robomimic 형식 HDF5로 저장.
 

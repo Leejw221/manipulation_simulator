@@ -33,7 +33,7 @@ env_kwargs:
 # OnlineStageTrackerTransport(rollout에 실제 쓰이는 causal estimator)로 재계산해 기록한
 # 사본. train에서 본 라벨과 rollout에서 주입되는 라벨이 정의상 일치하게 만들어, 라벨
 # 정확도가 stage-as-input null의 원인인지 격리해서 확인한다.
-hdf5_path: data/transport_check/transport/ph/transport_image_v15_online_stage.hdf5
+hdf5_path: data/robomimic/transport/transport/ph/transport_image_v15_online_stage.hdf5
 camera_names: [agentview, robot0_eye_in_hand, robot1_eye_in_hand]
 image_size: 84
 rgb_keys: [agentview_image, robot0_eye_in_hand_image, robot1_eye_in_hand_image]

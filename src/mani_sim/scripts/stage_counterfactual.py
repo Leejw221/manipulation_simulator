@@ -9,7 +9,7 @@ stage 변경 하나로 격리. noise floor(같은 stage·다른 시드)와 비�
     python -m mani_sim.scripts.stage_counterfactual --checkpoint outputs/train/square_stage_diffusion_unet/policy_epoch300.pt
     python -m mani_sim.scripts.stage_counterfactual --task transport_stage \
         --checkpoint outputs/train/transport_stage_diffusion_seed0/policy_epoch500.pt \
-        --hdf5 data/transport_check/transport/ph/transport_image_v15.hdf5
+        --hdf5 data/robomimic/transport/transport/ph/transport_image_v15.hdf5
 """
 
 import argparse
