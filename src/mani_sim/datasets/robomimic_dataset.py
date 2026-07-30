@@ -107,6 +107,22 @@ class RobomimicSequenceDataset(torch.utils.data.Dataset):
             labels[index] = cache[demo_id][index_in_demo]
         return labels
 
+    def get_action_mode_window(self, width):
+        """샘플(윈도우)별 앞 width개 프레임의 action_mode (N, width).
+        zarr_dataset.ZarrSequenceDataset.get_action_mode_window와 동일 계약 —
+        샘플러와 loss(desirable_mask)가 같은 기준으로 판정하게 하기 위함."""
+        seq = self._seq_dataset
+        cache = {}
+        out = np.empty((len(seq), width), dtype=np.int64)
+        for index in range(len(seq)):
+            demo_id, index_in_demo = self._demo_id_and_index_in_demo(index)
+            if demo_id not in cache:
+                cache[demo_id] = seq.hdf5_file[f"data/{demo_id}/action_mode"][()]
+            arr = cache[demo_id]
+            idxs = np.clip(np.arange(index_in_demo, index_in_demo + width), 0, len(arr) - 1)
+            out[index] = arr[idxs]
+        return out
+
     def __getitem__(self, index):
         raw = self._seq_dataset[index]
 

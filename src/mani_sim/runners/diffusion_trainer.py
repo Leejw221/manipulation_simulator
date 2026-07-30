@@ -175,11 +175,24 @@ class DiffusionTrainer:
         # 죽는다 - apo_sampler.py가 2026-07-17부터 있었지만 한 번도 연결된 적 없었음).
         sampler = None
         if self.system is not None:
+            # undesirable 판정은 loss(datasets/labels.desirable_mask)와 같은 기준(앞
+            # preference_frames 프레임 다수결)을 써야 목표 배치 구성이 실제로 재현된다 —
+            # 첫 프레임만 보던 기존 방식은 목표 25%가 loss에선 18.3%로 새어나갔다
+            # (EXP-10.md 2026-07-30~31 전수조사). 데이터셋이 윈도우 라벨을 제공하지 못하면
+            # 기존 동작으로 자동 폴백.
+            pref_frames = cfg.system.get("preference_frames", 8)
+            window_labels = (
+                self.dataset.get_action_mode_window(pref_frames)
+                if hasattr(self.dataset, "get_action_mode_window")
+                else None
+            )
             sampler = build_balanced_sampler(
                 self.dataset.get_action_mode_first_frame(),
                 target_correct=cfg.system.sampler_target_correct,
                 target_interaction=cfg.system.sampler_target_interaction,
                 target_incorrect=cfg.system.sampler_target_incorrect,
+                action_mode_window=window_labels,
+                preference_frames=pref_frames,
             )
         self.dataloader = DataLoader(
             self.dataset, batch_size=cfg.batch_size, shuffle=(sampler is None), sampler=sampler,

@@ -58,6 +58,24 @@ class ZarrSequenceDataset(torch.utils.data.Dataset):
         )
         return action_mode[global_positions]
 
+    def get_action_mode_window(self, width):
+        """샘플(윈도우)별 앞 width개 프레임의 action_mode (N, width).
+
+        get_action_mode_first_frame이 첫 프레임 하나만 보는 것과 달리, loss 쪽
+        `datasets/labels.desirable_mask`가 실제로 쓰는 것과 같은 윈도우를 돌려준다 —
+        두 곳이 다른 기준으로 판정하면 샘플러가 목표한 배치 구성이 loss에서 그대로
+        재현되지 않는다(EXP-10.md 2026-07-30~31: PREINTV로 뽑힌 윈도우의 26.7%가
+        loss에선 desirable로 뒤집혀 목표 25%가 실제 18.3%만 반영됐음).
+        데모 경계 밖은 __getitem__의 _get_window와 동일하게 가장자리 반복(clip)."""
+        action_mode = self._buffer.data["action_mode"][:]
+        out = np.empty((len(self._index), width), dtype=np.int64)
+        for i, (demo_id, t) in enumerate(self._index):
+            start = int(self._episode_starts[demo_id])
+            demo_len = int(self._episode_ends[demo_id]) - start
+            idxs = [start + int(np.clip(t + o, 0, demo_len - 1)) for o in range(width)]
+            out[i] = action_mode[idxs]
+        return out
+
     def __len__(self):
         return len(self._index)
 
