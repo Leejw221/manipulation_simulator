@@ -58,7 +58,7 @@ class ApoSystem:
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
-                 action_error_source="noise_mse"):
+                 action_error_source="noise_mse", weight_ref_timestep=None):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -116,6 +116,10 @@ class ApoSystem:
         assert action_error_source in ("noise_mse", "x0_l1"), \
             f"action_error_source={action_error_source!r} 미지원"
         self.action_error_source = action_error_source
+        # weight_ref_timestep(기본 None=기존 동작): adaptive weight를 계산할 때 쓸
+        # 고정 기준 timestep. None이면 학습 손실과 같은 샘플별 랜덤 t를 그대로 쓴다.
+        # 값을 주면 가중치만 그 t에서 별도 forward로 계산 — compute_loss 해당 분기 주석 참고.
+        self.weight_ref_timestep = weight_ref_timestep
         self.last_action_error = 0.0
 
         self.reference_ema_enabled = reference_ema_enabled
@@ -214,7 +218,29 @@ class ApoSystem:
                     ).sum(dim=1)
 
         if self.weighting is not None:
-            if self.action_error_source == "x0_l1":
+            if self.weight_ref_timestep is not None:
+                # 가중치 전용 고정 기준 timestep(2026-07-31 추가).
+                # 문제: adaptive weight는 배치 안 샘플들의 오차를 서로 비교해 순위를 매기는데
+                # (w_i = e_i/sum(e)), 샘플마다 t가 랜덤이라 오차 크기가 t에 따라 100배 넘게
+                # 달라진다(실측: base MSE가 t=0-9에서 0.1485 vs t=90-99에서 0.0012). 그러면
+                # 순위가 "이 샘플이 어려운가"가 아니라 "어떤 t를 뽑았는가"를 반영한다. APO
+                # 원문은 토큰 디코딩이라 timestep 개념이 없어 이 문제가 없다 — diffusion 이식에서
+                # 새로 생긴 구조적 문제(EXP-10.md 2026-07-31 절).
+                # 해결: 학습 손실은 표준 DDPM대로 샘플별 랜덤 t를 그대로 쓰고(gradient 분산
+                # 이점 유지), **가중치 계산만** 모든 샘플에 공통인 고정 t에서 별도 forward로
+                # 구한다. 역전파 없음(가중치는 원래 detach 대상).
+                with torch.no_grad():
+                    t_ref = torch.full((B,), int(self.weight_ref_timestep), device=device, dtype=torch.long)
+                    noisy_ref = scheduler.add_noise(action, noise, t_ref)
+                    pred_ref = policy.unet(noisy_ref, t_ref, cond)
+                    if self.action_error_source == "x0_l1":
+                        abar_r = scheduler.alphas_cumprod.to(device)[t_ref].view(-1, 1, 1)
+                        x0_r = ((noisy_ref - (1 - abar_r).sqrt() * pred_ref) / abar_r.sqrt()).clamp(-1.0, 1.0)
+                        err_bt = (x0_r - action).abs().mean(dim=-1)
+                    else:
+                        err_bt = F.mse_loss(pred_ref, noise, reduction="none").mean(dim=-1)
+                    error = (err_bt * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
+            elif self.action_error_source == "x0_l1":
                 # APO 원문은 adaptive weight를 reward와 **다른 양**으로 계산한다: reward는
                 # 토큰 log확률 비지만, weight는 토큰을 연속 액션으로 디코딩한 뒤의 L1 오차다
                 # (`ddp_robotic_trainer.py:276-295`의 decode_token_ids_to_actions →
@@ -306,4 +332,5 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         ars_k1=sys_cfg.get("ars_k1", 1.0),
         ars_eps=sys_cfg.get("ars_eps", 1e-4),
         action_error_source=sys_cfg.get("action_error_source", "noise_mse"),
+        weight_ref_timestep=sys_cfg.get("weight_ref_timestep", None),
     )
