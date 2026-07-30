@@ -57,7 +57,7 @@ class ApoSystem:
                  preference_frames, init_state_dict=None, reference_ema_enabled=False,
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
-                 bc_aux_weight=0.0, z0_method="match"):
+                 bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_temperature=1.0):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -81,7 +81,11 @@ class ApoSystem:
         `train_kto_sd_v1.5.py`)의 `--bce_offset` argparse 기본값은 "none"(=match)이고, 논문
         결과를 낸 `exps/example.sh`도 이 플래그를 안 넘겨 기본값 그대로 씀[검증-코드,
         2026-07-30] — mismatch는 U-Net을 2회 더 돌려야 해서 SD 규모에선 비쌌을 것으로 추정.
-        우리 UNet은 작아 두 방식 다 실험 대상(EXP-10.md 2026-07-30 절)."""
+        우리 UNet은 작아 두 방식 다 실험 대상(EXP-10.md 2026-07-30 절).
+
+        ars_enabled/ars_temperature: Adaptive Rejection Scaling — losses/apo_loss.py 모듈
+        docstring 참고(arXiv:2511.19049 기반, chosen과 구별하기 어려운 rejected 샘플의
+        밀어내는 힘을 줄여 spillover로 인한 chosen 품질 붕괴를 완화)."""
         if init_state_dict is not None:
             policy.load_state_dict(init_state_dict)
 
@@ -108,6 +112,7 @@ class ApoSystem:
         self.kto_loss = APOKTOLoss(
             beta=beta, desirable_weight=desirable_weight, undesirable_weight=undesirable_weight,
             preference_frames=preference_frames, z0_clamp_min=z0_clamp_min, z0_clamp_max=z0_clamp_max,
+            ars_enabled=ars_enabled, ars_temperature=ars_temperature,
         )
         self.last_ref_distance = 0.0
         # bc_aux_weight(기본 0=원문 그대로): KTO sigmoid는 이미 reward>z0인 desirable
@@ -239,4 +244,6 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         lora_alpha=sys_cfg.get("lora_alpha", 16),
         bc_aux_weight=sys_cfg.get("bc_aux_weight", 0.0),
         z0_method=sys_cfg.get("z0_method", "match"),
+        ars_enabled=sys_cfg.get("ars_enabled", False),
+        ars_temperature=sys_cfg.get("ars_temperature", 1.0),
     )

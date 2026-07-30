@@ -122,6 +122,14 @@ system:
                        # (base가 잘하던 reach가 8회 시도 전부에서 무너짐, weighting 축 유무와
                        # 무관) — desirable 샘플에 표준 noise-MSE loss를 더해 saturate돼도
                        # "이 행동을 계속 재현하라"는 gradient가 남게 함. 근거: EXP-10.md.
+  ars_enabled: false  # 2026-07-30 추가, 원문엔 없는 항(기본 꺼짐) — Adaptive Rejection Scaling.
+                       # arXiv:2511.19049(Beyond Reward Margin) 근거: chosen과 구별하기 어려운
+                       # rejected 샘플(z0에 가까움)일수록 그 gradient가 chosen 쪽으로 번져
+                       # (spillover) chosen 품질까지 깎아먹는다 — 우리 PREINTV(rejected)가
+                       # DEMO/ROLLOUT(chosen) 바로 직전 프레임이라 정확히 이 최악 조건에
+                       # 해당할 수 있다는 가설(round1 mismatch 붕괴 관측 이후). 근거: EXP-10.md
+                       # 2026-07-30 저녁 절. losses/apo_loss.py 모듈 docstring 참고.
+  ars_temperature: 1.0  # sigmoid(margin/ars_temperature) 스케일 — beta처럼 실측 재조정 필요.
 
 # 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
 # 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의
