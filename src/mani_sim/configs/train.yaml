@@ -132,6 +132,22 @@ system:
   ars_k1: 1.0    # PG-DPO 원문 Eq.7의 K1(sigmoid 안 스케일). beta처럼 실측 재조정 필요.
   ars_eps: 1.0e-4  # 원문 eps — 분모(|rejected_reward|) 0 나눗셈 방지용, action_error.py의
                     # eps 관례와 동일 크기.
+  action_error_source: noise_mse  # noise_mse(기본) | x0_l1. weighting(action_error 축)에
+                       # 넘길 "오차"의 정의. APO 원문은 reward(토큰 log확률)와 weight(디코딩된
+                       # 연속 액션 L1)를 의도적으로 다른 양으로 쓴다(논문 4.2절). x0_l1은 그
+                       # 대응물(노이즈 예측에서 복원한 액션의 GT 대비 L1)이나, x0오차 =
+                       # sqrt((1-abar_t)/abar_t) x 노이즈오차 항등식 때문에 timestep 편향을
+                       # 오히려 크게 끌어들인다(계수가 t=5에서 0.106, t=95에서 16.02) —
+                       # weight_ref_timestep이 같은 문제를 더 직접 해결하므로 기본값 유지.
+                       # 근거: EXP-10.md 2026-07-31 절, apo_system.py 해당 분기 주석.
+  weight_ref_timestep: null  # null(기본, 기존 동작) | 정수 t. adaptive weight를 계산할 때
+                       # 쓸 고정 기준 timestep. null이면 학습 손실과 같은 샘플별 랜덤 t를
+                       # 그대로 쓴다. 문제: 가중치는 배치 내 샘플 오차의 상대 순위로 작동하는데
+                       # 샘플마다 t가 랜덤이라 오차 분산의 79%를 timestep이 설명하고, 진짜
+                       # 샘플 난이도와의 순위 상관은 0.46에 그친다[검증-실측]. 반면 서로 다른
+                       # 고정 t에서 잰 난이도끼리는 상관 0.73~0.92로 일관 — 신호는 실재하나
+                       # 잡음에 묻혀 있다. 값을 주면 가중치만 그 t에서 별도 no_grad forward로
+                       # 계산한다(학습 손실은 표준 DDPM대로 랜덤 t 유지 — gradient 분산 이점 보존).
 
 # 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
 # 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의
