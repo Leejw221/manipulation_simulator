@@ -119,7 +119,9 @@ class APOKTOLoss:
         n_rejected = int((~mask).sum().item())
 
         chosen_reward = reward[mask]
-        chosen_losses = self.desirable_weight * (1 - torch.sigmoid(self.beta * (chosen_reward - z0)))
+        margin_chosen = chosen_reward - z0  # 클수록(양수) chosen이 z0보다 명확히 나음=안전
+        chosen_util = torch.sigmoid(self.beta * margin_chosen)  # KTO/Diffusion-KTO의 utility 항 그 자체
+        chosen_losses = self.desirable_weight * (1 - chosen_util)
         chosen_weight_raw = sample_weight[mask]
         chosen_weight_sum = float(chosen_weight_raw.sum().item()) if n_chosen else 0.0
         # 그룹 내 평균을 1.0으로 재정규화 — action_error weight의 그룹합이 exp(-x) 곡률 때문에
@@ -130,7 +132,9 @@ class APOKTOLoss:
         chosen_weight = chosen_weight_raw / max(chosen_weight_sum, 1e-8) * n_chosen if n_chosen else chosen_weight_raw
 
         rejected_reward = reward_reject[~mask]
-        margin = z0 - rejected_reward  # 클수록(양수) 그 rejected 샘플이 z0보다 명확히 나쁨=안전
+        margin_rejected = z0 - rejected_reward  # 클수록(양수) 그 rejected 샘플이 z0보다 명확히 나쁨=안전
+        margin = margin_rejected  # 기존 이름(ARS 계산에서 그대로 사용) 유지
+        rejected_util = torch.sigmoid(self.beta * margin_rejected)  # ars 적용 전 utility 항
         if self.ars_enabled:
             # PG-DPO 원문 Eq.7: sigmoid(K1·(r_w-r_l)/(r_l+eps)) — r_w를 z0로 대체(unpaired라
             # 페어가 없음), 분모는 |r_l|+eps로 절대값(원문은 r_l+eps인데 우리 reward는 부호가
@@ -154,6 +158,14 @@ class APOKTOLoss:
         weights = torch.cat([chosen_weight, rejected_weight])
         total_loss = (losses * weights).sum()
 
+        # 그룹별 실제 loss 기여도(weight까지 반영된 후) — desirable_weight/undesirable_weight·
+        # n_chosen/n_rejected로 "이론상" 비율을 계산했던 것(EXP-10.md 2026-07-30 정정 절)을
+        # 매 스텝 실측으로 직접 검증할 수 있게 로깅한다. chosen_contrib+rejected_contrib=total_loss.
+        chosen_contrib = float((chosen_losses.detach() * chosen_weight.detach()).sum().item()) if n_chosen else 0.0
+        rejected_contrib = (
+            float((rejected_losses.detach() * rejected_weight.detach()).sum().item()) if n_rejected else 0.0
+        )
+
         metrics = OrderedDict(
             num_chosen=n_chosen,
             num_rejected=n_rejected,
@@ -166,5 +178,15 @@ class APOKTOLoss:
             raw_weight_sum_chosen=chosen_weight_sum,
             raw_weight_sum_rejected=rejected_weight_sum,
             ars_scale_mean=float(ars_scale.detach().mean().item()) if n_rejected else float("nan"),
+            # utility 항(KTO/Diffusion-KTO Eq.8의 U) 자체 — reward 값이 아니라 "loss가 실제로
+            # 얼마나 만족됐는가"를 직접 보여준다. 1에 가까울수록 그 그룹의 loss가 만족(=낮음),
+            # 0에 가까울수록 불만족(=높음). mean(sigmoid(x)) != sigmoid(mean(x))이라 reward_mean/z0로부터
+            # 역산 불가 — 반드시 per-sample로 따로 평균내야 한다.
+            margin_chosen_mean=float(margin_chosen.detach().mean().item()) if n_chosen else float("nan"),
+            margin_rejected_mean=float(margin_rejected.detach().mean().item()) if n_rejected else float("nan"),
+            chosen_util_mean=float(chosen_util.detach().mean().item()) if n_chosen else float("nan"),
+            rejected_util_mean=float(rejected_util.detach().mean().item()) if n_rejected else float("nan"),
+            chosen_loss_contrib=chosen_contrib,
+            rejected_loss_contrib=rejected_contrib,
         )
         return total_loss, metrics

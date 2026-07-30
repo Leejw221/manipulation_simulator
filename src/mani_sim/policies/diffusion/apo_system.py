@@ -217,12 +217,34 @@ class ApoSystem:
             log_probs_reject=log_probs_reject, ref_log_probs_reject=ref_log_probs_reject,
         )
 
+        des = _desirable_mask(action_mode, preference_frames=self.kto_loss.preference_frames)
+
         if self.bc_aux_weight > 0:
-            des = _desirable_mask(action_mode, preference_frames=self.kto_loss.preference_frames)
             per_sample_error = (model_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
             bc_loss = (per_sample_error * des.float()).sum()  # sum, not mean — matches kto_loss's sum convention
             total_loss = total_loss + self.bc_aux_weight * bc_loss
             metrics["bc_aux_loss"] = bc_loss.item()
+
+        # raw(=reference와 무관한 절대) MSE — reward(=ref-model 상대값)만으로는 "정말 model이
+        # desirable에서 정밀해지고 undesirable에서 뭉툭해지는지" 직접 볼 수 없다(EXP-10.md
+        # 2026-07-30 밤 "z0 공유로 인한 비대칭 결합" 절 — LoRA 저랭크 제약 때문에 두 그룹을
+        # 따로 조각하는 대신 전체적으로 뭉툭해지는 지름길을 택했을 가능성 가설, 아직 미검증).
+        # chosen/rejected 각각 raw model_mse가 이후 라운드에서 실제로 같이 움직이는지(=뭉툭해짐의
+        # 증거) 확인하기 위한 진단 전용 로그 — loss 계산엔 관여 안 함.
+        with torch.no_grad():
+            per_sample_mse = (model_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            per_sample_mse_ng = (model_mse_ng * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            per_sample_ref_mse = (ref_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            per_sample_ref_mse_ng = (ref_mse_ng * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            n_ch, n_rej = int(des.sum().item()), int((~des).sum().item())
+            metrics["raw_model_mse_chosen"] = float(per_sample_mse[des].mean().item()) if n_ch else float("nan")
+            metrics["raw_model_mse_rejected"] = (
+                float(per_sample_mse_ng[~des].mean().item()) if n_rej else float("nan")
+            )
+            metrics["raw_ref_mse_chosen"] = float(per_sample_ref_mse[des].mean().item()) if n_ch else float("nan")
+            metrics["raw_ref_mse_rejected"] = (
+                float(per_sample_ref_mse_ng[~des].mean().item()) if n_rej else float("nan")
+            )
 
         metrics["ref_distance"] = self.last_ref_distance
         return total_loss, metrics
