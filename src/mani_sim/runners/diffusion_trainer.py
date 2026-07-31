@@ -33,7 +33,7 @@ from torch.utils.data import DataLoader
 
 from mani_sim.datasets.apo_sampler import build_balanced_sampler
 from mani_sim.datasets.normalization import (
-    MinMaxNormalizer, compute_minmax_stats, compute_minmax_stats_zarr, save_stats,
+    MinMaxNormalizer, compute_minmax_stats, compute_minmax_stats_zarr, load_stats, save_stats,
 )
 from mani_sim.datasets.robomimic_dataset import RobomimicSequenceDataset
 from mani_sim.datasets.zarr_dataset import ZarrSequenceDataset
@@ -64,10 +64,25 @@ class DiffusionTrainer:
         os.makedirs(cfg.output_dir, exist_ok=True)
 
         lowdim_keys = task_lowdim_keys(cfg.task)
-        if self.uses_zarr:
-            stats = compute_minmax_stats_zarr(cfg.task.zarr_path, lowdim_keys)
+        # init_from으로 파인튜닝할 땐 그 체크포인트의 정규화 통계를 그대로 승계한다
+        # (2026-07-31). 여태 무조건 학습 데이터로 새로 계산했는데, 불러온 가중치는 원래
+        # 통계에 맞춰져 있으므로 통계를 갈아끼우면 같은 물리값이 다른 정규화값으로 들어가
+        # 학습 전부터 정책이 어긋난 입력을 보게 된다(실측: base 가중치 그대로 두고 통계만
+        # demo50->merged로 바꾸니 demo 재현 L1 +28.4%). EXP-10.md 2026-07-31 절 참고.
+        init_from = cfg.get("init_from", None)
+        init_stats_path = (
+            os.path.join(os.path.dirname(init_from), "normalization_stats.json") if init_from else None
+        )
+        if init_stats_path and cfg.get("inherit_init_stats", True) and os.path.exists(init_stats_path):
+            stats = load_stats(init_stats_path)
+            logger.info(f"정규화 통계 승계: {init_stats_path}")
         else:
-            stats = compute_minmax_stats(cfg.task.hdf5_path, lowdim_keys)
+            if init_stats_path and cfg.get("inherit_init_stats", True):
+                logger.warning(f"init_from 옆에 통계 파일이 없어 새로 계산함: {init_stats_path}")
+            if self.uses_zarr:
+                stats = compute_minmax_stats_zarr(cfg.task.zarr_path, lowdim_keys)
+            else:
+                stats = compute_minmax_stats(cfg.task.hdf5_path, lowdim_keys)
         save_stats(stats, os.path.join(cfg.output_dir, "normalization_stats.json"))
         self.normalizer = MinMaxNormalizer(stats)
 

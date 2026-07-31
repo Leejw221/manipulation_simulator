@@ -154,6 +154,13 @@ system:
 # policy/reference가 같은 vla_path에서 출발하는 것과 동일). null이면 scratch(reference도
 # 무작위 초기화 정책의 복제 — 의미는 약하지만 죽지는 않음).
 init_from: null
+inherit_init_stats: true  # 2026-07-31 추가. init_from이 있으면 그 체크포인트 옆의
+                          # normalization_stats.json을 그대로 쓴다(없으면 경고 후 새로 계산).
+                          # 여태 무조건 학습 데이터로 새로 계산했는데, 파인튜닝에서 이건 틀린
+                          # 동작이다 — 불러온 가중치가 원래 통계에 맞춰져 있으므로 통계를
+                          # 바꾸면 같은 물리값이 다른 정규화값으로 들어간다(실측: base 가중치
+                          # 고정, 통계만 demo50->merged 교체로 demo 재현 L1 +28.4%, 최대 이동은
+                          # eef_quat[3]에서 0.650). 과거 동작을 재현하려면 false로 끌 것.
 
 resume: false
 # manipulation_pipeline 컨벤션(outputs/<task>/<model>/<session>)을 그대로 따름 — <session>은
