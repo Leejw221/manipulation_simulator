@@ -366,6 +366,8 @@ class DiffusionTrainer:
                     from mani_sim.networks.lora import merge_lora
                     save_policy = copy.deepcopy(self.policy)
                     merge_lora(save_policy.unet)
+                    if getattr(self.system, "encoder_lora", False) and hasattr(save_policy, "encoders"):
+                        merge_lora(save_policy.encoders)
                 path = save_epoch_checkpoint(self.cfg.output_dir, epoch + 1, save_policy)
                 save_resume_state(self.cfg.output_dir, epoch + 1, self.policy, self.optimizer, self.lr_scheduler)
                 logger.info(f"saved checkpoint: {path} (+ resume_state.pt)")

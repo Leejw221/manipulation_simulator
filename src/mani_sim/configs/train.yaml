@@ -157,6 +157,12 @@ system:
                        # 인코더를 정책 네트워크의 1/10 lr로 함께 학습하는 걸 최선으로
                        # 보고한다[문헌] — 그래서 기본 스케일도 0.1을 권장값으로 적어둔다
                        # (기본값 자체는 하위호환을 위해 0.0).
+  encoder_lora: false  # false(기본, 하위호환) | true면 encoder_lr_scale>0일 때 인코더를
+                       # full fine-tune 대신 UNet과 같은 LoRA(저랭크 제약)로 연다. 근거:
+                       # encoder_lr_scale 주석 및 apo_system.py ApoSystem docstring —
+                       # full fine-tune으로 이동량을 키울수록(scale 0.1->1.0) 오히려 성공률이
+                       # 떨어지는 패턴이 나와, "제약 없는 자유도" 자체가 원인일 수 있다는
+                       # 가설을 검증하기 위함(2026-08-01).
 
 # 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
 # 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의

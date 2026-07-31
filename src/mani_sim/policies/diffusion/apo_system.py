@@ -58,7 +58,8 @@ class ApoSystem:
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
-                 action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0):
+                 action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
+                 encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -101,7 +102,14 @@ class ApoSystem:
         (파인튜닝이 base 위에 뭔가를 더 배우는 게 아니라 계속 깎아먹기만 하는 모양). Diffusion
         Policy/OpenVLA 문헌 둘 다 인코더 동결이 성능을 떨어뜨리고(약한 lr로 함께 학습이 최선),
         DP는 정책 네트워크의 1/10 lr을 권장한다[문헌, 2026-07-31 WebSearch로 확인]. 근거 상세는
-        EXP-10.md 2026-07-31 절."""
+        EXP-10.md 2026-07-31 절.
+
+        encoder_lora(기본 False, 2026-08-01 추가): encoder_lr_scale>0일 때 인코더를 여는 방식.
+        False면 기존 동작(전체 파라미터 직접 학습, full fine-tune) — 그런데 이동량을
+        키울수록(scale 0.1->1.0) 오히려 성공률이 떨어지는 패턴이 관측됐다(base 36% > 34% >
+        29%/28%, EXP-10.md 2026-08-01 절). UNet은 LoRA(저랭크 제약)라 망각에 덜 취약한데
+        인코더는 무제약이었다는 게 차이일 수 있다는 가설[산출, 미검증] — True면 인코더도
+        UNet과 같은 방식(apply_lora)으로 저랭크 제약을 걸어 이 가설을 검증한다."""
         if init_state_dict is not None:
             policy.load_state_dict(init_state_dict)
 
@@ -113,13 +121,17 @@ class ApoSystem:
 
         self.use_lora = use_lora
         self.encoder_lr_scale = encoder_lr_scale
+        self.encoder_lora = encoder_lora
         if use_lora:
             for p in policy.parameters():
                 p.requires_grad_(False)
             apply_lora(policy.unet, rank=lora_rank, alpha=lora_alpha)
             if encoder_lr_scale > 0 and hasattr(policy, "encoders"):
-                for p in policy.encoders.parameters():
-                    p.requires_grad_(True)
+                if encoder_lora:
+                    apply_lora(policy.encoders, rank=lora_rank, alpha=lora_alpha)
+                else:
+                    for p in policy.encoders.parameters():
+                        p.requires_grad_(True)
 
         assert z0_method in ("match", "mismatch"), f"z0_method={z0_method!r} 미지원"
         self.z0_method = z0_method
@@ -354,4 +366,5 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         action_error_source=sys_cfg.get("action_error_source", "noise_mse"),
         weight_ref_timestep=sys_cfg.get("weight_ref_timestep", None),
         encoder_lr_scale=sys_cfg.get("encoder_lr_scale", 0.0),
+        encoder_lora=sys_cfg.get("encoder_lora", False),
     )
