@@ -194,20 +194,22 @@ class ApoSystem:
         # z0(KL anchor) — z0_method="mismatch"면 KTO 원문 방식(state는 그대로 두고 action만
         # 다른 샘플 것으로 섞은 mismatched pair로 별도 추정, KTO paper Implementation 절
         # "matching inputs x′ with unrelated outputs yU′", APO 원문 코드의 `mismatch_label`
-        # 확인, 2026-07-29). "match"(기본, 2026-07-30)면 diffusion-kto 공식 코드
-        # (`train_kto_sd_v1.5.py`) 기본값(`--bce_offset=none`)과 동일하게 셔플 없이 배치
-        # reward 평균을 씀(APOKTOLoss.compute의 mismatch_reward=None 분기) — 자세한 트레이드오프는
+        # 확인, 2026-07-29). **매칭 방식은 APO 원문 코드(`dataset/collator.py`,
+        # `PaddedCollatorForActionPrediction`)와 일치시킴 — 무작위 순열이 아니라
+        # `indices = list(range(1,N)) + [0]` 형태의 **결정적 circular shift**(배치 내
+        # 인덱스를 한 칸씩 미룸, [검증-코드, 2026-07-31 WebFetch로 직접 확인] — 이전엔
+        # `torch.randperm`으로 잘못 구현돼 있었음, EXP-10.md 2026-07-31 절 참고).
+        # "match"(2026-07-30)면 diffusion-kto 공식 코드(`train_kto_sd_v1.5.py`) 기본값
+        # (`--bce_offset=none`)과 동일하게 셔플 없이 배치 reward 평균을 씀
+        # (APOKTOLoss.compute의 mismatch_reward=None 분기) — 자세한 트레이드오프는
         # apo_system.py 모듈 docstring/EXP-10.md 2026-07-30 절 참고.
         # mismatch일 땐 KL 항 역전파 안 함(원문 "we do not back-propagate through the KL term").
         mismatch_reward = None
         if self.z0_method == "mismatch":
             with torch.no_grad():
                 if B > 1:
-                    perm = torch.randperm(B, device=device)
-                    if (perm == torch.arange(B, device=device)).all():
-                        perm = torch.roll(perm, 1)
-                    mismatch_action = action[perm]
-                    mismatch_mask = mask * mask[perm]
+                    mismatch_action = torch.roll(action, shifts=-1, dims=0)
+                    mismatch_mask = mask * torch.roll(mask, shifts=-1, dims=0)
                     mismatch_noisy = scheduler.add_noise(mismatch_action, noise, timesteps)
                     mismatch_pred = policy.unet(mismatch_noisy, timesteps, cond)
                     mismatch_model_mse = F.mse_loss(mismatch_pred, noise, reduction="none").mean(dim=-1)
