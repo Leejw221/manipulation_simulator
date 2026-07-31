@@ -148,6 +148,15 @@ system:
                        # 고정 t에서 잰 난이도끼리는 상관 0.73~0.92로 일관 — 신호는 실재하나
                        # 잡음에 묻혀 있다. 값을 주면 가중치만 그 t에서 별도 no_grad forward로
                        # 계산한다(학습 손실은 표준 DDPM대로 랜덤 t 유지 — gradient 분산 이점 보존).
+  encoder_lr_scale: 0.0  # 0.0(기본, 기존 동작=완전 동결) | 0보다 크면 use_lora=true여도
+                       # policy.encoders(비전 인코더)를 학습 가능하게 풀고, 이 값을 base lr에
+                       # 곱한 lr로 별도 파라미터 그룹을 만든다(diffusion_trainer.py). 근거는
+                       # apo_system.py ApoSystem 클래스 docstring 참고 — round1에서 인코더
+                       # 동결 상태로는 손실 형태·undesirable_weight를 뭘 바꿔도 base를 못
+                       # 넘었고 전부 epoch에 따라 단조 악화했다. Diffusion Policy 문헌은
+                       # 인코더를 정책 네트워크의 1/10 lr로 함께 학습하는 걸 최선으로
+                       # 보고한다[문헌] — 그래서 기본 스케일도 0.1을 권장값으로 적어둔다
+                       # (기본값 자체는 하위호환을 위해 0.0).
 
 # 직전 라운드 체크포인트 경로. system=apo일 때 policy를 여기서 warm-start하고 reference를
 # 그 시점에서 복제한다(round.py가 배포에 쓴 체크포인트를 그대로 넘김 — APO 원문의

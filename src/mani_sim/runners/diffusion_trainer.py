@@ -218,8 +218,27 @@ class DiffusionTrainer:
         # LoRA(system.use_lora=true)면 policy.parameters()의 대부분이 requires_grad=False —
         # optimizer엔 학습 가능한 것만 넘긴다(LoRA 없을 때는 전부 True라 동작 그대로).
         self.trainable_params = [p for p in self.policy.parameters() if p.requires_grad]
+        # encoder_lr_scale>0(system.kind=apo 전용, 2026-07-31 추가)이면 인코더 파라미터를
+        # base lr의 이 배율로 별도 그룹에 넣는다 — ApoSystem이 requires_grad만 켜고 lr
+        # 분리는 여기서 한다(다른 시스템은 encoder_lr_scale 자체가 없어 항상 단일 그룹).
+        encoder_lr_scale = float(getattr(self.system, "encoder_lr_scale", 0.0) or 0.0)
+        if encoder_lr_scale > 0 and hasattr(self.policy, "encoders"):
+            enc_ids = {id(p) for p in self.policy.encoders.parameters()}
+            enc_params = [p for p in self.trainable_params if id(p) in enc_ids]
+            other_params = [p for p in self.trainable_params if id(p) not in enc_ids]
+            logger.info(
+                f"encoder_lr_scale={encoder_lr_scale}: encoder {sum(p.numel() for p in enc_params)/1e6:.1f}M "
+                f"params at lr={cfg.lr * encoder_lr_scale:.2e}, 나머지 {sum(p.numel() for p in other_params)/1e6:.1f}M "
+                f"at lr={cfg.lr:.2e}"
+            )
+            param_groups = [
+                {"params": other_params, "lr": cfg.lr},
+                {"params": enc_params, "lr": cfg.lr * encoder_lr_scale},
+            ]
+        else:
+            param_groups = self.trainable_params
         self.optimizer = torch.optim.AdamW(
-            self.trainable_params, lr=cfg.lr, weight_decay=cfg.weight_decay,
+            param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay,
             betas=(0.95, 0.999), eps=1e-8,
         )
         total_steps = max(cfg.num_epochs * len(self.dataloader), 1)

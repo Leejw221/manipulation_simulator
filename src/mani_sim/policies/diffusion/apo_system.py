@@ -58,7 +58,7 @@ class ApoSystem:
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
-                 action_error_source="noise_mse", weight_ref_timestep=None):
+                 action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -87,7 +87,21 @@ class ApoSystem:
         ars_enabled/ars_k1/ars_eps: Adaptive Rejection Scaling(PG-DPO Eq.7 기반, K1/eps는
         원문과 동일한 이름) — losses/apo_loss.py 모듈 docstring 참고(arXiv:2511.19049,
         chosen과 구별하기 어려운 rejected 샘플의 밀어내는 힘을 줄여 spillover로 인한
-        chosen 품질 붕괴를 완화)."""
+        chosen 품질 붕괴를 완화).
+
+        encoder_lr_scale(기본 0.0=완전 동결, 2026-07-31 추가): use_lora=True일 때도
+        policy.encoders(비전 인코더)를 학습 가능하게 풀지 여부 — 0보다 크면 unfreeze하고,
+        트레이너가 이 값을 base lr에 곱한 lr로 별도 파라미터 그룹을 만든다(실제 스케일링은
+        diffusion_trainer.py에서 수행, 여기선 requires_grad만 켠다).
+        APO 원문(OpenVLA)은 비전 백본이 인터넷 규모 foundation model이라 동결해도 downstream
+        재조합만으로 충분하지만, 우리 인코더는 demo 50개로 처음부터 학습한 ResNet18이라
+        원문의 전제(백본에 이미 충분한 지각이 있음)가 성립하지 않는다 — 실측(round1):
+        인코더를 동결한 채로는 손실 형태를 KTO<->순수 BC로 바꿔도(26%<->18%), undesirable_weight를
+        0~3으로 바꿔도(16%~2%) base(30~32%)를 넘지 못했고, 전부 epoch이 늘수록 단조 감소했다
+        (파인튜닝이 base 위에 뭔가를 더 배우는 게 아니라 계속 깎아먹기만 하는 모양). Diffusion
+        Policy/OpenVLA 문헌 둘 다 인코더 동결이 성능을 떨어뜨리고(약한 lr로 함께 학습이 최선),
+        DP는 정책 네트워크의 1/10 lr을 권장한다[문헌, 2026-07-31 WebSearch로 확인]. 근거 상세는
+        EXP-10.md 2026-07-31 절."""
         if init_state_dict is not None:
             policy.load_state_dict(init_state_dict)
 
@@ -98,10 +112,14 @@ class ApoSystem:
         self.reference = reference
 
         self.use_lora = use_lora
+        self.encoder_lr_scale = encoder_lr_scale
         if use_lora:
             for p in policy.parameters():
                 p.requires_grad_(False)
             apply_lora(policy.unet, rank=lora_rank, alpha=lora_alpha)
+            if encoder_lr_scale > 0 and hasattr(policy, "encoders"):
+                for p in policy.encoders.parameters():
+                    p.requires_grad_(True)
 
         assert z0_method in ("match", "mismatch"), f"z0_method={z0_method!r} 미지원"
         self.z0_method = z0_method
@@ -335,4 +353,5 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         ars_eps=sys_cfg.get("ars_eps", 1e-4),
         action_error_source=sys_cfg.get("action_error_source", "noise_mse"),
         weight_ref_timestep=sys_cfg.get("weight_ref_timestep", None),
+        encoder_lr_scale=sys_cfg.get("encoder_lr_scale", 0.0),
     )
