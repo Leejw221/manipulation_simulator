@@ -191,6 +191,7 @@ def collect_episode(
     async_infer=False,
     merger_name="overwrite",
     te_coeff=0.01,
+    print_diagnostics=True,
 ):
     """한 에피소드를 개입 가능 상태로 돌려 프레임별 (obs, action, action_mode)를 수집.
 
@@ -212,6 +213,12 @@ def collect_episode(
     체크포인트처럼 자체 정규화·RNN 은닉상태를 갖는 정책 — 이 경우 T=1로 매 스텝 재계획해도
     무방). None이면 기존 (policy, normalizer, obs_keys, obs_horizon, device) 기반
     _predict_chunk를 그대로 쓴다(우리 자체 DP/BC-RNN 정책, 기존 동작 그대로).
+
+    print_diagnostics(기본 True, 2026-08-01 추가): 매 에피소드 끝 [타이밍 진단]/[async_infer
+    진단] 줄을 찍을지. collect.py의 실시간 PICO 배포·render=true 관찰에선 끊김 원인 진단에
+    쓰이므로 기본 유지. eval.py의 headless n=100/200 배치 평가(rollout.py:128)는 렌더링도
+    control_fps 페이싱도 없어 이 진단이 의미 없고 에피소드마다 한 줄씩 쌓여 로그만
+    지저분해지므로 False로 끈다.
 
     async_infer=True면 predict_fn을 PolicyServer 스레드에서 끊임없이 돌리고(moai_policy
     flare/inference 이식, 2026-07-27), 메인 루프는 매 스텝 merger에서 그 시점 action을
@@ -296,8 +303,10 @@ def collect_episode(
         if async_ctx is not None:
             async_ctx["stop_event"].set()
             async_ctx["obs_provider"].stop()
-            _print_async_stats(async_ctx, len(mode_seq))
-        _print_timing_stats(step_times_ms, render_times_ms, control_fps)
+            if print_diagnostics:
+                _print_async_stats(async_ctx, len(mode_seq))
+        if print_diagnostics:
+            _print_timing_stats(step_times_ms, render_times_ms, control_fps)
 
     modes = relabel_preintv(np.asarray(mode_seq, dtype=np.int64), preintv_length)
     return {

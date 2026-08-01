@@ -128,7 +128,7 @@ def rollout_policy(
             result = collect_episode(
                 env, policy, normalizer, obs_keys, obs_horizon, action_horizon, device,
                 lambda step, obs_raw: None, max_steps=max_steps, render=False, control_fps=0.0,
-                predict_fn=predict_fn, async_infer=False,
+                predict_fn=predict_fn, async_infer=False, print_diagnostics=False,
             )
             success = result["success"]
             step_count = len(result["actions"])

@@ -368,8 +368,12 @@ def main(cfg: DictConfig):
     else:
         metrics = _run_dp_eval(cfg, device)
 
-    logger.info(f"checkpoint={cfg.checkpoint_path} {metrics}")
-    print(metrics)
+    # episodes 리스트(n=100/200이면 화면을 뒤덮음)는 아래에서 episodes.csv로 따로 저장하니
+    # 콘솔에는 요약만 찍는다(2026-08-01) - 에피소드별 성공/스텝은 위 collect_episode 쪽
+    # "ep N: steps=X success=Y" 줄(verbose=True)로 이미 실시간으로 보인다.
+    summary = {k: v for k, v in metrics.items() if k != "episodes"}
+    logger.info(f"checkpoint={cfg.checkpoint_path} {summary}")
+    print(summary)
 
     output_dir = cfg.output_dir or os.path.join(
         os.path.dirname(cfg.checkpoint_path), "eval_results", time.strftime("%Y%m%d-%H%M%S")
