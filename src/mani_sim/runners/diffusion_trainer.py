@@ -31,7 +31,7 @@ import os
 import torch
 from torch.utils.data import DataLoader
 
-from mani_sim.datasets.apo_sampler import build_balanced_sampler
+from mani_sim.datasets.apo_sampler import build_balanced_sampler, build_interaction_exhaustion_sampler
 from mani_sim.datasets.normalization import (
     MinMaxNormalizer, compute_minmax_stats, compute_minmax_stats_zarr, load_stats, save_stats,
 )
@@ -201,14 +201,30 @@ class DiffusionTrainer:
                 if hasattr(self.dataset, "get_action_mode_window")
                 else None
             )
-            sampler = build_balanced_sampler(
-                self.dataset.get_action_mode_first_frame(),
-                target_correct=cfg.system.sampler_target_correct,
-                target_interaction=cfg.system.sampler_target_interaction,
-                target_incorrect=cfg.system.sampler_target_incorrect,
-                action_mode_window=window_labels,
-                preference_frames=pref_frames,
-            )
+            # sampler_kind=interaction_exhaustion(2026-08-05 추가)이면 원문처럼 "1 epoch =
+            # interaction 소진 시점"으로 정의하는 sampler를 쓴다 — 기본(weighted)은 "1 epoch
+            # = len(dataset)" 고정이라 interaction이 적은 라운드는 그 소수 샘플이 한 epoch
+            # 안에서도 반복 노출되는 문제가 있음(EXP-10.md 2026-08-04/05 절).
+            sampler_kind = cfg.system.get("sampler_kind", "weighted")
+            if sampler_kind == "interaction_exhaustion":
+                sampler = build_interaction_exhaustion_sampler(
+                    self.dataset.get_action_mode_first_frame(),
+                    batch_size=cfg.batch_size,
+                    target_correct=cfg.system.sampler_target_correct,
+                    target_interaction=cfg.system.sampler_target_interaction,
+                    target_incorrect=cfg.system.sampler_target_incorrect,
+                    action_mode_window=window_labels,
+                    preference_frames=pref_frames,
+                )
+            else:
+                sampler = build_balanced_sampler(
+                    self.dataset.get_action_mode_first_frame(),
+                    target_correct=cfg.system.sampler_target_correct,
+                    target_interaction=cfg.system.sampler_target_interaction,
+                    target_incorrect=cfg.system.sampler_target_incorrect,
+                    action_mode_window=window_labels,
+                    preference_frames=pref_frames,
+                )
         self.dataloader = DataLoader(
             self.dataset, batch_size=cfg.batch_size, shuffle=(sampler is None), sampler=sampler,
             num_workers=cfg.num_workers, drop_last=True, persistent_workers=cfg.num_workers >= 1,
