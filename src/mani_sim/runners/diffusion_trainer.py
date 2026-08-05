@@ -44,8 +44,8 @@ from mani_sim.utils.checkpoints import (
     get_latest_epoch_checkpoint, load_resume_state, save_epoch_checkpoint, save_resume_state, save_run_config,
 )
 from mani_sim.utils.task_utils import (
-    is_image_task, is_piper_task, make_eval_env, read_all_action_modes, task_lowdim_keys, task_obs_keys,
-    uses_zarr_dataset,
+    is_image_task, is_piper_task, is_robocasa_task, make_eval_env, read_all_action_modes, task_lowdim_keys,
+    task_obs_keys, uses_zarr_dataset,
 )
 
 logger = logging.getLogger(__name__)
@@ -314,6 +314,8 @@ class DiffusionTrainer:
         return epoch
 
     def evaluate(self, num_episodes, max_steps):
+        if is_robocasa_task(self.task_cfg):
+            return self._evaluate_robocasa(num_episodes, max_steps)
         if self._eval_env is None:
             self._eval_env = make_eval_env(self.task_cfg)
         extra_obs_fn = self._stage_extra_obs_fn if self._stage_tracker is not None else None
@@ -326,6 +328,55 @@ class DiffusionTrainer:
             extra_obs_fn=extra_obs_fn, extra_obs_reset_fn=extra_reset_fn,
         )
         self.policy.train()
+        return metrics
+
+    def _evaluate_robocasa(self, num_episodes, max_steps):
+        """RoboCasa(RestockBowls 등) 학습 중 주기 평가 — is_robocasa_task() 참고: robosuite/
+        robocasa 패키지가 이 프로세스(robomimic conda env)엔 없어서 env를 직접 못 만든다.
+        `robocasa/scripts/eval_rollout.py`를 robocasa conda env 서브프로세스로 돌리고
+        표준출력의 "성공률: n/N = X%"·"stage>=k: n/N = X%" 줄을 파싱한다(2026-08-06,
+        EXP-01 "학습 중 rollout eval 연동" — 스크립트를 새로 만들지 않고 이미 검증된
+        eval_rollout.py를 그대로 재사용, 출력 포맷 안 바뀌면 파싱도 안 깨짐).
+
+        평가마다 현재 policy 가중치를 고정 경로(policy_eval_latest.pt)에 따로 저장한다 —
+        ckpt_every_epochs 주기와 eval_every_epochs 주기가 다를 수 있어서, 정기 체크포인트에
+        기대면 "지금 epoch"이 아니라 오래된 가중치를 평가할 위험이 있음.
+
+        경로는 전부 절대경로로 넘긴다 — 서브프로세스의 cwd가 robocasa/scripts라 상대경로를
+        주면 거기 기준으로 잘못 풀림(스모크 테스트에서 실제로 FileNotFoundError로 확인됨,
+        2026-08-06)."""
+        import re
+        import subprocess
+
+        eval_ckpt_path = os.path.abspath(os.path.join(self.cfg.output_dir, "policy_eval_latest.pt"))
+        torch.save({"model": self.policy.state_dict()}, eval_ckpt_path)
+        stats_path = os.path.abspath(os.path.join(self.cfg.output_dir, "normalization_stats.json"))
+        episode_ids = ",".join(str(i) for i in range(num_episodes))
+
+        cmd = [
+            "conda", "run", "-n", "robocasa", "python", "eval_rollout.py",
+            "--ckpt", eval_ckpt_path, "--stats", stats_path,
+            "--episode_ids", episode_ids, "--max_steps", str(max_steps),
+        ]
+        if self.num_stages:
+            cmd += ["--num_stages", str(self.num_stages)]
+
+        result = subprocess.run(
+            cmd, cwd="/home/moai/jungwook_ws/ljw_workspace/robocasa/scripts",
+            capture_output=True, text=True, timeout=3600,
+        )
+        out = result.stdout
+        sr_match = re.search(r"성공률: \d+/\d+ = ([\d.]+)%", out)
+        if sr_match is None:
+            logger.warning(
+                f"[eval] robocasa 서브프로세스 출력 파싱 실패(success_rate=0.0으로 처리) — "
+                f"stderr 마지막 1000자: {result.stderr[-1000:]}"
+            )
+            return {"success_rate": 0.0}
+
+        metrics = {"success_rate": float(sr_match.group(1)) / 100}
+        for m in re.finditer(r"stage>=(\d+): \d+/\d+ = ([\d.]+)%", out):
+            metrics[f"stage_ge_{m.group(1)}"] = float(m.group(2)) / 100
         return metrics
 
     def train(self, num_epochs, start_epoch=0, use_wandb=False):
@@ -408,7 +459,11 @@ class DiffusionTrainer:
                 logger.info(f"[eval] epoch {epoch + 1} success_rate {metrics['success_rate']:.3f} "
                             f"(n={self.cfg.eval_episodes})")
                 if use_wandb:
-                    wandb.log({"eval/success_rate": metrics["success_rate"], "epoch": epoch + 1}, step=global_step)
+                    # stage_ge_N(robocasa 전용, _evaluate_robocasa 참고)이 있으면 eval/stage_ge_N으로
+                    # 같이 로깅 — 다른 task는 이 키가 없어서 success_rate만 그대로 찍힘(하위호환).
+                    log_dict = {"eval/success_rate": metrics["success_rate"], "epoch": epoch + 1}
+                    log_dict.update({f"eval/{k}": v for k, v in metrics.items() if k != "success_rate"})
+                    wandb.log(log_dict, step=global_step)
 
         if self._eval_env is not None:
             self._eval_env.env.close()

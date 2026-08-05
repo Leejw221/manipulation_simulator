@@ -16,6 +16,15 @@ def is_piper_task(task_cfg):
     return task_cfg.get("env_backend", "robosuite") == "piper_mujoco"
 
 
+def is_robocasa_task(task_cfg):
+    """RoboCasa(RestockBowls 등)는 robosuite/robocasa 패키지가 학습 env(robomimic conda
+    env)엔 없고 별도 robocasa conda env에만 있어서(2026-08-06 확인 — 두 env의 robosuite
+    버전이 달라 같은 env에 같이 깔면 충돌 위험, 의도적으로 분리해둔 것) make_eval_env가
+    직접 env를 만들 수 없다. diffusion_trainer.py는 이 값이 True면 evaluate()에서
+    robocasa/scripts/eval_rollout.py를 서브프로세스로 돌려 우회한다."""
+    return task_cfg.get("env_backend", "robosuite") == "robocasa"
+
+
 def uses_zarr_dataset(task_cfg):
     """학습 데이터를 Zarr(ReplayBuffer)에서 읽을지 여부 - is_piper_task와 독립된 축이다.
 
@@ -148,7 +157,17 @@ def make_eval_env(task_cfg, render=False, renderer="mjviewer", image_size_overri
     (collect.py 참고, eval.py는 image+render 자체를 막음).
 
     env_backend="piper_mujoco"(2026-07-26)면 robosuite 경로를 아예 안 타고 raw MuJoCo
-    어댑터(PiperSortReturnEnv)로 분기한다 — robosuite가 지원 안 하는 로봇(Piper)용."""
+    어댑터(PiperSortReturnEnv)로 분기한다 — robosuite가 지원 안 하는 로봇(Piper)용.
+
+    env_backend="robocasa"는 여기서 절대 못 옴 — diffusion_trainer.py의 evaluate()가
+    is_robocasa_task()로 먼저 걸러서 서브프로세스 경로로 보낸다(is_robocasa_task 참고).
+    혹시 실수로 여기까지 오면(env_name/robots가 애초에 없는 task config라) 바로 에러내는
+    게 낫다."""
+    if is_robocasa_task(task_cfg):
+        raise ValueError(
+            "make_eval_env는 robocasa task를 못 만든다 — evaluate()가 is_robocasa_task()로 "
+            "먼저 분기해야 함(호출 경로 확인 필요)."
+        )
     if is_piper_task(task_cfg):
         from mani_sim.envs.piper.piper_sort_return_env import PiperSortReturnEnv
 

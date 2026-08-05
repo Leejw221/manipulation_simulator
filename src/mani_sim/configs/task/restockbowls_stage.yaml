@@ -5,6 +5,7 @@
 name: restockbowls_stage
 dataset_backend: zarr
 zarr_path: /home/moai/jungwook_ws/ljw_workspace/robocasa/data/restockbowls.zarr
+env_backend: robocasa
 
 camera_names: [robot0_agentview_left, robot0_agentview_right, robot0_eye_in_hand]
 image_size: 84

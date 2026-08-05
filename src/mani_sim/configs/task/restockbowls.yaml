@@ -5,6 +5,7 @@
 name: restockbowls
 dataset_backend: zarr
 zarr_path: /home/moai/jungwook_ws/ljw_workspace/robocasa/data/restockbowls.zarr
+env_backend: robocasa
 
 camera_names: [robot0_agentview_left, robot0_agentview_right, robot0_eye_in_hand]
 image_size: 84
@@ -17,6 +18,7 @@ obs_dims:
   state: 16
 action_dim: 12
 
-# RoboCasa eval env adapter가 아직 없음(HANDOFF.md 다음 액션 참고) — 학습 시
-# eval_every_epochs=-1로 CLI override해서 rollout 평가를 꺼야 함(make_eval_env가
-# RoboCasa 환경을 못 만듦, robosuite 기본 경로가 아님).
+# 학습 중 주기 평가(eval_every_epochs>0)는 diffusion_trainer.py의 _evaluate_robocasa()가
+# robocasa/scripts/eval_rollout.py를 서브프로세스로 돌려서 처리한다(2026-08-06, EXP-01
+# "학습 중 rollout eval 연동" — is_robocasa_task() 참고). 스모크 테스트·짧은 실험이면
+# 여전히 eval_every_epochs=-1로 꺼도 됨(비용 절감).
