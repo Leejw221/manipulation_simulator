@@ -58,6 +58,7 @@ class ApoSystem:
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
+                 ars_ratio_clip=10.0,
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
                  encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
@@ -160,7 +161,7 @@ class ApoSystem:
         self.kto_loss = APOKTOLoss(
             beta=beta, desirable_weight=desirable_weight, undesirable_weight=undesirable_weight,
             preference_frames=preference_frames, z0_clamp_min=z0_clamp_min, z0_clamp_max=z0_clamp_max,
-            ars_enabled=ars_enabled, ars_k1=ars_k1, ars_eps=ars_eps,
+            ars_enabled=ars_enabled, ars_k1=ars_k1, ars_eps=ars_eps, ars_ratio_clip=ars_ratio_clip,
         )
         self.last_ref_distance = 0.0
         # bc_aux_weight(기본 0=원문 그대로): KTO sigmoid는 이미 reward>z0인 desirable
@@ -363,6 +364,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         ars_enabled=sys_cfg.get("ars_enabled", False),
         ars_k1=sys_cfg.get("ars_k1", 1.0),
         ars_eps=sys_cfg.get("ars_eps", 1e-4),
+        ars_ratio_clip=sys_cfg.get("ars_ratio_clip", 10.0),
         action_error_source=sys_cfg.get("action_error_source", "noise_mse"),
         weight_ref_timestep=sys_cfg.get("weight_ref_timestep", None),
         encoder_lr_scale=sys_cfg.get("encoder_lr_scale", 0.0),

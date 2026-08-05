@@ -38,6 +38,24 @@ KTO의 (원문과 달리 이미 분리된) rejected sigmoid 항 바깥에 곱한
 sigmoid 구조가 아니라 KTO의 독립된 두 항 구조라 적용 위치도 원문과 다름. 원문의 γ(모드
 전환) 항은 이번엔 구현 안 함.
 
+**분모 불안정성 + ratio clip 안전장치(2026-08-05 추가, [적응])**: `|reward_rejected_i|`가 0에
+가까운 샘플(=chosen과 가장 구별하기 어려운, 안전장치가 가장 필요한 바로 그 경우)에서는
+margin의 부호와 무관하게 비율 `margin/(|r_l|+ε)`의 크기가 폭주한다. **주의**: 이 자체가
+NaN/inf 같은 수치 오류를 일으키진 않는다 — `torch.sigmoid`는 fp32에서 큰 입력에도 안전하게
+0.0/1.0으로 saturate하고(직접 검증, 2026-08-05), 이 코드베이스는 mixed-precision(autocast)도
+안 씀. 실제 효과는: clamp 없이 ratio가 크게 튀면 `ars_scale`이 정확히 0.0 또는 1.0으로
+반올림돼 그 샘플의 rejected loss 기여가 완전히 사라지거나(gradient 완전 차단) 전혀 감쇠
+안 되는 극단이 됨 — clamp(±10, 직접 검증)을 걸면 `sigmoid(±10)≈0.999955/0.0000454`로 정확히
+0/1이 아닌 잔여 신호가 남는다. 즉 이 fix는 **지금 관측된 활성 버그를 고친다기보단, gradient가
+완전히 죽는 극단을 막고 K1 재조정·향후 mixed-precision 도입 등에 대비하는 방어적 장치**다.
+PG-DPO 원문(arXiv:2511.19049 Eq.7/Eq.8)은 "ε는 수치 안정용 작은 상수"라고만 하고 이 지점을
+다루지 않음([검증-원문], WebFetch로 확인). MADPO(arXiv:2510.05342)가 제안하는 piecewise
+cap 방식을 따라, sigmoid 적용 전에 비율 자체를 `ars_ratio_clip`(기본 10.0)으로 clamp한다:
+`ars_ratio = clamp(K1·margin/(|r_l|+ε), -ars_ratio_clip, ars_ratio_clip)`. round2에서 반복
+관측된 foreign-policy 개입 데이터(reference와 크게 어긋난 데이터)의 "confusable minority"
+샘플이 이 구간에 해당할 수 있다는 게 계기 — 이런 데이터가 앞으로도 반복될 것이므로 근본적으로
+학습 방식 자체가 견고해야 한다는 사용자 판단([사용자 지시], 2026-08-05).
+
 **동기**: 우리 undesirable(PREINTV) 샘플은 정의상 desirable(DEMO/ROLLOUT) 샘플 바로 직전
 프레임이라 시각적·운동학적으로 가장 가깝다 — 이 논문이 말하는 "spillover 최악 조건"에
 가깝다는 게 round1 mismatch 붕괴(사각너트 아닌 곳으로 접근) 관측 이후 유력 가설로 지목됨.
@@ -79,6 +97,7 @@ class APOKTOLoss:
         ars_enabled=False,
         ars_k1=1.0,
         ars_eps=1e-4,
+        ars_ratio_clip=10.0,
     ):
         self.beta = beta
         self.desirable_weight = desirable_weight
@@ -89,6 +108,7 @@ class APOKTOLoss:
         self.ars_enabled = ars_enabled
         self.ars_k1 = ars_k1
         self.ars_eps = ars_eps
+        self.ars_ratio_clip = ars_ratio_clip
 
     def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None,
                 log_probs_reject=None, ref_log_probs_reject=None):
@@ -142,9 +162,9 @@ class APOKTOLoss:
             # docstring 참고). stop-gradient(순수 스케일 팩터, z0/margin/분모 전부 학습
             # 신호로 안 씀) — chosen과 구별하기 어려운(margin 작음/음수) 샘플일수록 밀어내는
             # 힘을 줄인다.
-            ars_scale = torch.sigmoid(
-                self.ars_k1 * margin.detach() / (rejected_reward.detach().abs() + self.ars_eps)
-            )
+            ars_ratio = self.ars_k1 * margin.detach() / (rejected_reward.detach().abs() + self.ars_eps)
+            ars_ratio = ars_ratio.clamp(min=-self.ars_ratio_clip, max=self.ars_ratio_clip)
+            ars_scale = torch.sigmoid(ars_ratio)
         else:
             ars_scale = torch.ones_like(rejected_reward)
         rejected_losses = self.undesirable_weight * ars_scale * (1 - torch.sigmoid(self.beta * margin))

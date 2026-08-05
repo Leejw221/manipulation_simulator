@@ -137,6 +137,11 @@ system:
   ars_k1: 1.0    # PG-DPO 원문 Eq.7의 K1(sigmoid 안 스케일). beta처럼 실측 재조정 필요.
   ars_eps: 1.0e-4  # 원문 eps — 분모(|rejected_reward|) 0 나눗셈 방지용, action_error.py의
                     # eps 관례와 동일 크기.
+  ars_ratio_clip: 10.0  # 2026-08-05 추가 — sigmoid 적용 전 ars_ratio를 [-clip,clip]으로
+                    # clamp. |rejected_reward|가 0 근처(=chosen과 가장 구별 어려운, 안전장치가
+                    # 가장 필요한 경우)일 때 ratio가 폭주해 sigmoid가 극단(0/1)으로 튀는 걸
+                    # 방지(MADPO, arXiv:2510.05342의 piecewise cap 방식). losses/apo_loss.py
+                    # 모듈 docstring 참고.
   action_error_source: noise_mse  # noise_mse(기본) | x0_l1. weighting(action_error 축)에
                        # 넘길 "오차"의 정의. APO 원문은 reward(토큰 log확률)와 weight(디코딩된
                        # 연속 액션 L1)를 의도적으로 다른 양으로 쓴다(논문 4.2절). x0_l1은 그
