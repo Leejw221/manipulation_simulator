@@ -11,3 +11,7 @@ num_train_timesteps: 100
 beta_schedule: squaredcos_cap_v2
 num_inference_steps: 100
 crop_hw: [76, 76]
+# stage-conditioning(2026-08-04) — task.num_stages 없는 task엔 무시됨(하위호환).
+# 정당화 근거는 robocasa/research_design.md "임베딩 크기를 어떻게 정할지" 절 —
+# 이론으로 정해진 값 아니고 실측 스윕 잠정 1위, 재검증 필요.
+stage_embed_dim: 32

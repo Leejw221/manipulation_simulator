@@ -83,8 +83,17 @@ class DiffusionTrainer:
                 stats = compute_minmax_stats_zarr(cfg.task.zarr_path, lowdim_keys)
             else:
                 stats = compute_minmax_stats(cfg.task.hdf5_path, lowdim_keys)
+        # stage(카테고리 인덱스, task.num_stages 있을 때만)는 lowdim_keys가 아니라 별도
+        # obs_key로 들어와서(task_obs_keys 참고) 위 stats엔 없음 — ZarrSequenceDataset이
+        # rgb 아닌 모든 obs_key를 일괄 normalize_obs에 넘기므로, 최소/최대를 trivial하게
+        # [0, num_stages-1]로 넣어 정규화를 통과시키고 학습 루프에서 정수 인덱스로 되돌린다
+        # (policies/diffusion/diffusion_policy_image.py의 nn.Embedding이 정수를 기대함).
+        num_stages = cfg.task.get("num_stages", None)
+        if num_stages and "stage" not in stats["obs"]:
+            stats["obs"]["stage"] = {"min": [0.0], "max": [float(num_stages - 1)]}
         save_stats(stats, os.path.join(cfg.output_dir, "normalization_stats.json"))
         self.normalizer = MinMaxNormalizer(stats)
+        self.num_stages = num_stages
 
         self.weighting = None
         self.weighting_kind = None
@@ -309,8 +318,11 @@ class DiffusionTrainer:
         global_step = start_epoch * len(self.dataloader)
         for epoch in range(start_epoch, num_epochs):
             for raw_batch in self.dataloader:
+                obs = {k: v.to(self.device) for k, v in raw_batch["obs"].items()}
+                if self.num_stages and "stage" in obs:
+                    obs["stage"] = ((obs["stage"] + 1) / 2 * (self.num_stages - 1)).round().long()
                 batch = {
-                    "obs": {k: v.to(self.device) for k, v in raw_batch["obs"].items()},
+                    "obs": obs,
                     "action": raw_batch["action"].to(self.device),
                     "action_mask": raw_batch["action_mask"].to(self.device),
                 }

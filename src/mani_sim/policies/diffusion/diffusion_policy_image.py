@@ -93,6 +93,8 @@ class DiffusionPolicyImage(nn.Module):
         num_train_timesteps=100,
         beta_schedule="squaredcos_cap_v2",
         num_inference_steps=10,
+        num_stages=None,
+        stage_embed_dim=32,
     ):
         super().__init__()
         self.rgb_keys = list(rgb_keys)
@@ -107,7 +109,14 @@ class DiffusionPolicyImage(nn.Module):
         )
         feat = next(iter(self.encoders.values())).out_dim if self.rgb_keys else 0
 
-        per_step_dim = len(self.rgb_keys) * feat + sum(obs_dims[k] for k in self.lowdim_keys)
+        # stage를 raw 정수로 concat하면 이미지(카메라당 64차원) 대비 무시될 만큼 작음
+        # (2026-07-24 교수님 미팅 지적) — 학습되는 임베딩 공간으로 보낸 뒤 concat.
+        # robocasa/research_design.md "Stage conditioning 주입 방법" 참고.
+        self.num_stages = num_stages
+        self.stage_embed = nn.Embedding(num_stages, stage_embed_dim) if num_stages else None
+        stage_dim = stage_embed_dim if num_stages else 0
+
+        per_step_dim = len(self.rgb_keys) * feat + sum(obs_dims[k] for k in self.lowdim_keys) + stage_dim
         global_cond_dim = obs_horizon * per_step_dim
         self.unet = ConditionalUnet1d(
             input_dim=action_dim, global_cond_dim=global_cond_dim, down_dims=down_dims,
@@ -126,7 +135,7 @@ class DiffusionPolicyImage(nn.Module):
         )
 
     def _encode(self, obs):
-        """obs: rgb (B,To,C,H,W) / lowdim (B,To,D) → global_cond (B, To*per_step)."""
+        """obs: rgb (B,To,C,H,W) / lowdim (B,To,D) / stage (B,To) int64 → global_cond (B, To*per_step)."""
         feats = []
         for k in self.rgb_keys:
             img = obs[k]                       # (B, To, C, H, W)
@@ -135,6 +144,10 @@ class DiffusionPolicyImage(nn.Module):
             feats.append(f.reshape(b, to, -1))
         for k in self.lowdim_keys:
             feats.append(obs[k])               # (B, To, D)
+        if self.stage_embed is not None:
+            # ZarrSequenceDataset은 rgb가 아닌 모든 obs_key를 float32로 캐스팅해서 돌려줌
+            # (stage도 예외 없음) - nn.Embedding엔 정수 인덱스가 필요해 여기서 되돌림.
+            feats.append(self.stage_embed(obs["stage"].long()))  # (B, To, stage_embed_dim)
         per_step = torch.cat(feats, dim=-1)    # (B, To, per_step)
         return per_step.flatten(start_dim=1)
 

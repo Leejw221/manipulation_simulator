@@ -46,4 +46,8 @@ def _build_diffusion(task_cfg, policy_cfg):
         num_train_timesteps=policy_cfg.num_train_timesteps,
         beta_schedule=policy_cfg.beta_schedule,
         num_inference_steps=policy_cfg.num_inference_steps,
+        # stage-conditioning(2026-08-04, robocasa 실험) — task.num_stages가 없으면 둘 다
+        # None/무시되고 기존 동작 그대로(하위호환). 근거: robocasa/research_design.md.
+        num_stages=task_cfg.get("num_stages", None),
+        stage_embed_dim=policy_cfg.get("stage_embed_dim", 32),
     )
