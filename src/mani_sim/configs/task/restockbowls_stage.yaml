@@ -1,0 +1,17 @@
+# RoboCasa RestockBowls(long-horizon task, LHT) — stage-conditioned.
+# restockbowls.yaml과 num_stages 한 줄만 다름. stage는 lowdim_keys가 아니라 task_obs_keys()가
+# 별도로 obs_key에 추가하고(task_utils.py), DiffusionPolicyImage가 nn.Embedding으로 처리한다
+# (raw concat이 아님 — 2026-07-24 교수님 미팅 지적 반영, robocasa/research_design.md 참고).
+name: restockbowls_stage
+dataset_backend: zarr
+zarr_path: /home/moai/jungwook_ws/ljw_workspace/robocasa/data/restockbowls.zarr
+
+camera_names: [robot0_agentview_left, robot0_agentview_right, robot0_eye_in_hand]
+image_size: 84
+rgb_keys: [robot0_agentview_left_image, robot0_agentview_right_image, robot0_eye_in_hand_image]
+lowdim_keys: [state]
+num_stages: 6
+
+obs_dims:
+  state: 16
+action_dim: 12

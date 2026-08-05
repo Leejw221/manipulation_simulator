@@ -47,8 +47,15 @@ def read_all_action_modes(task_cfg):
 
 def task_obs_keys(task_cfg):
     if is_image_task(task_cfg):
-        return list(task_cfg.rgb_keys) + list(task_cfg.lowdim_keys)
-    return list(task_cfg.obs_keys)
+        keys = list(task_cfg.rgb_keys) + list(task_cfg.lowdim_keys)
+    else:
+        keys = list(task_cfg.obs_keys)
+    # stage(카테고리 인덱스, nn.Embedding으로 별도 처리)는 lowdim_keys가 아니라 여기서만
+    # 추가한다 - lowdim_keys에 넣으면 DiffusionPolicyImage._encode()가 raw concat과 임베딩
+    # 둘 다에 중복으로 넣게 된다(2026-08-04, robocasa stage-conditioning 실험).
+    if task_cfg.get("num_stages", None):
+        keys = keys + ["stage"]
+    return keys
 
 
 def task_lowdim_keys(task_cfg):
