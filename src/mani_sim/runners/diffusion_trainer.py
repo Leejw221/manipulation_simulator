@@ -379,7 +379,10 @@ class DiffusionTrainer:
                     if use_wandb:
                         log_dict = {"loss": loss.item(), "lr": self.lr_scheduler.get_last_lr()[0],
                                     "grad_norm": float(grad_norm), "epoch": epoch}
-                        log_dict.update({f"system/{k}": v for k, v in metrics.items()})
+                        # "system/" 접두사는 wandb가 예약해둔 System 섹션 이름과 겹쳐서
+                        # 그 섹션의 기본 X축(_runtime)을 물려받아 그래프가 안 뜨는 문제가
+                        # 있었음(2026-08-06 발견) — "diag/"로 변경.
+                        log_dict.update({f"diag/{k}": v for k, v in metrics.items()})
                         wandb.log(log_dict, step=global_step)
                 global_step += 1
 
