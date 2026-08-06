@@ -56,6 +56,18 @@ class DiffusionTrainer:
     def __init__(self, cfg, policy, device):
         self.cfg = cfg
         self.policy = policy.to(device)
+        # init_from 체크포인트 가중치 warm-start. 예전엔 이 로딩이 system.kind=apo일 때만
+        # (apo_system.py의 ApoSystem.__init__ 안에서) 일어났다 — system.kind=null(SIRIUS류
+        # weighting 경로)에서 init_from을 줘도 정규화 통계만 승계되고 정책 가중치는 계속
+        # 무작위 초기화 상태로 학습이 시작되는 버그였다(2026-08-06 발견 — round2-new SIRIUS
+        # 로그의 step0 loss가 1.12로 시작한 게 무작위 초기화 시그니처였음, 실측으로 확인).
+        # 여기서 무조건 먼저 불러오면 system.kind=apo 경로(ApoSystem이 같은 init_state_dict를
+        # 다시 한번 로드)와 겹치지만 동일한 가중치를 다시 씌우는 것뿐이라 안전하다.
+        init_from = cfg.get("init_from", None)
+        if init_from:
+            ckpt = torch.load(init_from, map_location=device, weights_only=False)
+            self.policy.load_state_dict(ckpt["model"])
+            logger.info(f"init_from 가중치 승계: {init_from}")
         self.device = device
         self.task_cfg = cfg.task
         self.is_image = is_image_task(cfg.task)
