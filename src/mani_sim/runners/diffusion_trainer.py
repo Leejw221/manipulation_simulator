@@ -405,43 +405,27 @@ class DiffusionTrainer:
             metrics[f"stage_ge_{m.group(1)}"] = float(m.group(2)) / 100
         return metrics
 
-    def _calibrate_z0_clamp(self, percentile):
-        """system.z0_clamp_auto=true일 때 학습 시작 전 1epoch만 forward(backward 없음)로
-        돌려 이번 라운드 실제 데이터의 z0 분포를 실측하고, 그 percentile로 z0_clamp를
-        정한다. 라운드마다 데이터가 바뀌므로 고정 상수(APO 원문 ±5 등)를 그대로 베끼지
-        않고 매번 재계산 — 근거: EXP-10.md 2026-08-07 밤 절(z0는 reward_std와 달리 step에
-        따라 크게 안 변한다는 실측 → 1epoch 샘플로도 충분).
-        """
-        z0_values = []
-        self.policy.eval()
-        with torch.no_grad():
-            for raw_batch in self.dataloader:
-                obs = {k: v.to(self.device) for k, v in raw_batch["obs"].items()}
-                if self.num_stages and "stage" in obs:
-                    obs["stage"] = ((obs["stage"] + 1) / 2 * (self.num_stages - 1)).round().long()
-                batch = {
-                    "obs": obs,
-                    "action": raw_batch["action"].to(self.device),
-                    "action_mask": raw_batch["action_mask"].to(self.device),
-                }
-                action_mode = raw_batch["action_mode"].to(self.device)
-                _, metrics = self.system.compute_loss(self.policy, batch, action_mode)
-                z0_values.append(metrics["z0"])
-        self.policy.train()
-        bound = float(torch.tensor(z0_values).abs().quantile(percentile / 100.0))
-        self.system.kto_loss.z0_clamp_min = -bound
-        self.system.kto_loss.z0_clamp_max = bound
-        logger.info(
-            f"z0_clamp 자동 캘리브레이션(1epoch, n={len(z0_values)}, p{percentile}): ±{bound:.3f}"
-        )
-
     def train(self, num_epochs, start_epoch=0, use_wandb=False):
         if use_wandb:
             import wandb
+        z0_calib_buffer = None
+        z0_calib_steps = 0
+        z0_calib_percentile = 99.0
         if self.system is not None:
             system_cfg = self.cfg.get("system", None)
             if system_cfg and system_cfg.get("z0_clamp_auto", False):
-                self._calibrate_z0_clamp(system_cfg.get("z0_clamp_calib_percentile", 99.0))
+                # 학습 시작 전(정책=reference라 reward가 전부 ~0) forward-only로 재는 건
+                # 무의미하다는 걸 실측으로 발견(2026-08-07 밤, z0_clamp 자동 캘리브레이션
+                # 첫 시도가 ±0.000으로 붕괴) — z0는 정책이 reference에서 실제로 벌어져야
+                # 의미 있는 스케일이 생기므로, **진짜 학습을 1epoch 진행시키면서**(그동안
+                # clamp는 사실상 풀어둠) z0를 수집하고, 그 구간 끝에 percentile로 clamp를
+                # 확정해 나머지 학습에 적용한다. 근거: EXP-10.md 2026-08-07 밤 절.
+                z0_calib_steps = system_cfg.get("z0_clamp_calib_steps", None) or len(self.dataloader)
+                z0_calib_percentile = system_cfg.get("z0_clamp_calib_percentile", 99.0)
+                z0_calib_buffer = []
+                self.system.kto_loss.z0_clamp_min = -1e6
+                self.system.kto_loss.z0_clamp_max = 1e6
+                logger.info(f"z0_clamp 자동 캘리브레이션 시작 — 앞 {z0_calib_steps}step 동안 z0 수집(clamp 임시 해제)")
         global_step = start_epoch * len(self.dataloader)
         for epoch in range(start_epoch, num_epochs):
             for raw_batch in self.dataloader:
@@ -457,6 +441,17 @@ class DiffusionTrainer:
                 if self.system is not None:
                     action_mode = raw_batch["action_mode"].to(self.device)
                     loss, metrics = self.system.compute_loss(self.policy, batch, action_mode)
+                    if z0_calib_buffer is not None:
+                        z0_calib_buffer.append(metrics["z0"])
+                        if len(z0_calib_buffer) >= z0_calib_steps:
+                            bound = float(torch.tensor(z0_calib_buffer).abs().quantile(z0_calib_percentile / 100.0))
+                            self.system.kto_loss.z0_clamp_min = -bound
+                            self.system.kto_loss.z0_clamp_max = bound
+                            logger.info(
+                                f"z0_clamp 자동 캘리브레이션 완료(n={len(z0_calib_buffer)}, "
+                                f"p{z0_calib_percentile}): ±{bound:.3f}"
+                            )
+                            z0_calib_buffer = None
                 elif self.weighting is not None:
                     per_sample_loss = self.policy.compute_loss(batch, reduction="none")  # (B,)
                     if self.weighting_kind in ("rabc", "phase_rule", "action_variance", "event_radius"):
