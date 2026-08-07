@@ -315,7 +315,12 @@ class ApoSystem:
 
         if self.bc_aux_weight > 0:
             per_sample_error = (model_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)  # (B,)
-            bc_loss = (per_sample_error * des.float()).sum()  # sum, not mean — matches kto_loss's sum convention
+            # mean(desirable 샘플 수 기준, 2026-08-07 수정) — kto_loss가 sum에서 mean으로
+            # 바뀐 것과 같은 이유(apo_loss.py 해당 라인 주석 참고)로 일관성 있게 맞춤. 이전엔
+            # sum이라 desirable 샘플 수가 많은 배치일수록 이 항의 영향력이 커지는 부작용도
+            # 있었음 — mean이면 그 문제도 같이 없어짐.
+            n_des = des.float().sum().clamp(min=1.0)
+            bc_loss = (per_sample_error * des.float()).sum() / n_des
             total_loss = total_loss + self.bc_aux_weight * bc_loss
             metrics["bc_aux_loss"] = bc_loss.item()
 

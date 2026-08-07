@@ -182,7 +182,16 @@ class APOKTOLoss:
 
         losses = torch.cat([chosen_losses, rejected_losses])
         weights = torch.cat([chosen_weight, rejected_weight])
-        total_loss = (losses * weights).sum()
+        # sum이 아니라 mean(2026-08-07 수정) — Diffusion-KTO 공식 코드(`loss = l_kto.mean()`,
+        # train_kto_sd_v1.5.py, 2026-08-07 WebFetch로 재확인)는 mean을 쓰는데 우리는 APO
+        # 원문 관행(sum, `APO_analysis.md` "sum vs mean: 논문 E(mean), 코드 sum → LR로 보정")을
+        # 따라가고 있었음 — mean은 batch size에 무관하지만 sum은 batch size에 비례해서
+        # gradient가 커진다. 우리 batch_size=64는 두 원문(KTO=4, APO=8)보다 훨씬 큰데 LR
+        # 재조정은 reward 스케일 차이만 반영했지 이 batch size 차이는 반영한 적이 없었음 —
+        # 우리 diffusion 다리 자체가 APO가 아니라 Diffusion-KTO를 따라 만든 것이므로, 두
+        # 원문이 갈리는 지점에선 Diffusion-KTO 쪽을 따르는 게 더 일관됨. grad_norm이
+        # 비정상적으로 컸던(수만 단위) 현상의 유력한 원인 후보.
+        total_loss = (losses * weights).mean()
 
         # 그룹별 실제 loss 기여도(weight까지 반영된 후) — desirable_weight/undesirable_weight·
         # n_chosen/n_rejected로 "이론상" 비율을 계산했던 것(EXP-10.md 2026-07-30 정정 절)을
