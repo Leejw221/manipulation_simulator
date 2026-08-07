@@ -309,9 +309,23 @@ class DiffusionTrainer:
         if resume_state is not None:
             self.policy.load_state_dict(resume_state["model"])
             self.optimizer.load_state_dict(resume_state["optimizer"])
-            self.lr_scheduler.load_state_dict(resume_state["lr_scheduler"])
             epoch = resume_state["epoch"]
-            logger.info(f"resumed from resume_state.pt (epoch {epoch}, optimizer/lr_scheduler 복원됨)")
+            # lr_scheduler는 저장된 state_dict를 그대로 복원하지 않고 step()으로 진행시킨다 -
+            # state_dict에는 T_max(스케줄이 몇 step에 걸쳐 감쇠하는지)도 들어있어서, cfg.num_epochs를
+            # 체크포인트 때보다 늘려서 재개(예: 80->120epoch 이어서 더 학습)하면 그대로 로드된 옛
+            # T_max(80epoch 기준, 이미 0 근처까지 감쇠 완료) 때문에 이후 LR이 0 근처에 고정되거나
+            # 코사인 주기성으로 오히려 다시 올라가는 문제가 있었다(2026-08-07, 사용자와 확인).
+            # step()으로 진행시키면 위 __init__에서 이미 새 cfg.num_epochs 기준 T_max로 만들어둔
+            # 스케줄러를 그대로 쓰면서 지금까지 진행된 step 수만큼만 앞으로 감아, 새 목표에 맞춰
+            # 자연스럽게 이어지는 감쇠 곡선이 된다. num_epochs가 그대로인 일반 resume(중단된 학습
+            # 재개)에서도 결과는 동일하다 — 두 스케줄러 모두 last_epoch(진행된 step 수)만으로 LR이
+            # 결정되는 순수 함수라, step() N번 호출은 "last_epoch=N인 state_dict를 로드"와 같다.
+            for _ in range(epoch * len(self.dataloader)):
+                self.lr_scheduler.step()
+            logger.info(
+                f"resumed from resume_state.pt (epoch {epoch}, optimizer 복원 + "
+                f"lr_scheduler는 num_epochs={self.cfg.num_epochs} 기준으로 fast-forward)"
+            )
             return epoch
 
         path, epoch = get_latest_epoch_checkpoint(self.cfg.output_dir)
