@@ -200,6 +200,10 @@ wandb_project: mani_sim
 wandb_run_name: null  # null이면 "{task}_{policy_name}" 기본값
 wandb_group: null
 wandb_tags: []
+# resume=true로 num_epochs를 늘려 이어서 학습할 때, wandb도 새 run이 아니라 원래 run에
+# 그대로 이어붙이고 싶으면 그 run의 id를 준다(wandb 프로젝트 URL의 runs/<id> 부분,
+# 2026-08-07). null(기본)이면 지금처럼 매번 새 run을 만듦.
+wandb_run_id: null
 
 # hydra 자체 로그/설정 스냅샷(.hydra/)도 같은 폴더에 쌓아 체크포인트와 분리되지 않게 한다
 # (전엔 outputs/<날짜>/<시각>/에 따로 생겼음 — hydra는 cwd는 안 바꾸므로(확인함, 2026-07-25)
