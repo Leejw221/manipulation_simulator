@@ -52,3 +52,16 @@ save_gif: null  # 지정하면 첫 에피소드의 agentview 프레임을 GIF로
 # stage에 진입한 뒤 처음 stage_shift_window 프레임 동안 stage+1(clamp)을 대신 주입.
 stage_shift_target: null
 stage_shift_window: 20
+
+# wandb 로깅(옵션, 기본 꺼짐, 2026-08-07) — 켜면 새 run을 만들지 않고 이 체크포인트를 만든
+# 학습의 wandb run을 이름으로 찾아 **이어서**(resume) eval/success_rate 등을 기록한다.
+# wandb_run_name은 학습 시 준 wandb_run_name과 정확히 같아야 한다(프로젝트 안에서 display
+# name으로 검색). 못 찾으면 에러 없이 경고만 찍고 건너뜀 — eval 자체(metrics.json 등 기존
+# 저장)는 wandb 연동 실패와 무관하게 항상 정상 진행된다.
+use_wandb: false
+wandb_project: Diffusion-APO
+wandb_run_name: null
+# true(기본)면 rollout 영상 1개(별도 에피소드, 통계 집계와 분리 - 메인 eval 속도에 영향
+# 없음)도 같이 올린다. policy_name=openvla는 아직 미지원(필요해지면 추가).
+wandb_log_video: true
+wandb_video_max_frames: 300

@@ -276,7 +276,83 @@ def _run_dp_eval(cfg, device):
                             duration=60, loop=0, optimize=True)
         logger.info(f"GIF 저장: {cfg.save_gif} ({len(gif_frames)} 프레임)")
     env.env.close()
+    if cfg.get("use_wandb", False):
+        _log_eval_to_wandb(cfg, metrics, policy, normalizer, device)
     return metrics
+
+
+def _record_rollout_video(cfg, policy, normalizer, device):
+    """wandb용 rollout 영상 — 별도 에피소드 1개를 렌더링하며 실행한다(메인 eval의 success_rate
+    집계 루프와 완전히 분리 - 기존 벤치마크 수치의 재현성/속도에 영향 안 주기 위함,
+    2026-08-07). collect_episode의 render_fn 훅(매 스텝 obs_raw와 함께 호출)으로 프레임을
+    모은다."""
+    from mani_sim.runners.intervention_rollout import _predict_chunk, collect_episode
+
+    env = make_eval_env(cfg.task)
+    camera = cfg.task.camera_names.front if is_piper_task(cfg.task) else "agentview"
+    frames = []
+    max_frames = cfg.get("wandb_video_max_frames", 300)
+
+    def predict_fn(obs_history):
+        return _predict_chunk(
+            policy, normalizer, obs_history, task_obs_keys(cfg.task), device,
+            rgb_keys=cfg.task.rgb_keys if is_image_task(cfg.task) else (),
+        )
+
+    def render_fn(obs_raw):
+        if len(frames) < max_frames:
+            frames.append(env.render(mode="rgb_array", height=256, width=256, camera_name=camera))
+        return True  # 계속 진행(False면 collect_episode가 조기 종료)
+
+    result = collect_episode(
+        env, policy, normalizer, task_obs_keys(cfg.task), cfg.policy.obs_horizon, cfg.policy.action_horizon,
+        device, lambda step, obs_raw: None, max_steps=cfg.max_steps, render=False, render_fn=render_fn,
+        control_fps=0.0, predict_fn=predict_fn, async_infer=False, print_diagnostics=False,
+    )
+    env.env.close()
+    return np.stack(frames), result["success"]
+
+
+def _log_eval_to_wandb(cfg, metrics, policy=None, normalizer=None, device=None):
+    """이 체크포인트를 만든 학습의 wandb run을 이름으로 찾아 **이어서**(resume) eval 결과를
+    기록한다 — 새 run을 만들지 않는다(2026-08-07). wandb_run_name이 프로젝트 안에서 정확히
+    일치하는 run이 있어야 하고, 없으면 경고만 남기고 조용히 건너뛴다(eval 자체의 성공/실패와
+    분리 — wandb 연동은 부가 기능이지 eval의 필수 조건이 아님)."""
+    if not cfg.get("wandb_run_name", None):
+        logger.warning("use_wandb=true인데 wandb_run_name이 없음 - wandb 로깅 건너뜀")
+        return
+    import wandb
+
+    api = wandb.Api()
+    matches = list(api.runs(cfg.wandb_project, filters={"display_name": cfg.wandb_run_name}))
+    if not matches:
+        logger.warning(
+            f"wandb run '{cfg.wandb_run_name}'을 프로젝트 '{cfg.wandb_project}'에서 못 찾음 - "
+            "wandb 로깅 건너뜀(학습 시 준 wandb_run_name과 정확히 같은지 확인할 것)"
+        )
+        return
+    if len(matches) > 1:
+        logger.warning(f"wandb run '{cfg.wandb_run_name}' {len(matches)}개 매칭 - 가장 최근 것 사용")
+    run_id = matches[0].id
+
+    wandb.init(project=cfg.wandb_project, id=run_id, resume="must")
+    log_payload = {
+        "eval/success_rate": metrics["success_rate"],
+        "eval/num_successes": metrics["num_successes"],
+        "eval/num_episodes": metrics["num_episodes"],
+        "eval/checkpoint_path": cfg.checkpoint_path,
+    }
+    if cfg.get("wandb_log_video", True) and policy is not None:
+        try:
+            frames, video_success = _record_rollout_video(cfg, policy, normalizer, device)
+            video = np.transpose(frames, (0, 3, 1, 2))  # (T,H,W,C) -> (T,C,H,W), wandb.Video 규약
+            log_payload["eval/rollout_video"] = wandb.Video(video, fps=20, format="mp4")
+            log_payload["eval/rollout_video_success"] = video_success
+        except Exception:
+            logger.exception("rollout 영상 기록 실패 - 나머지 지표는 그대로 기록하고 계속함")
+    wandb.log(log_payload)
+    wandb.finish()
+    logger.info(f"wandb run '{cfg.wandb_run_name}'(id={run_id})에 eval 결과 기록 완료")
 
 
 def _run_openvla_eval(cfg):

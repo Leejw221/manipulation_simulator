@@ -135,7 +135,12 @@ def rollout_policy(
             successes.append(success)
             episodes.append({"episode": ep, "success": success, "steps": step_count})
             if verbose:
-                print(f"ep {ep}: steps={step_count} success={success}")
+                n_success = sum(successes)
+                print(
+                    f"ep {ep}: steps={step_count} success={success} | "
+                    f"누적 {n_success}/{ep + 1} ({n_success / (ep + 1):.1%})",
+                    flush=True,
+                )
         return {
             "success_rate": float(np.mean(successes)),
             "num_episodes": num_episodes,
@@ -204,7 +209,12 @@ def rollout_policy(
         successes.append(success)
         episodes.append({"episode": ep, "success": success, "steps": step_count})
         if verbose:
-            print(f"ep {ep}: steps={step_count} success={success}")
+            n_success = sum(successes)
+            print(
+                f"ep {ep}: steps={step_count} success={success} | "
+                f"누적 {n_success}/{len(successes)} ({n_success / len(successes):.1%})",
+                flush=True,
+            )
         if ep_log is not None:
             trajectories.append({
                 "success": success,
@@ -257,7 +267,12 @@ def rollout_policy_async(
         successes.append(success)
         episodes.append({"episode": ep, "success": success, "steps": step_count})
         if verbose:
-            print(f"ep {ep}: steps={step_count} success={success}")
+            n_success = sum(successes)
+            print(
+                f"ep {ep}: steps={step_count} success={success} | "
+                f"누적 {n_success}/{len(successes)} ({n_success / len(successes):.1%})",
+                flush=True,
+            )
 
     return {
         "success_rate": float(np.mean(successes)),
