@@ -115,6 +115,17 @@ system:
   reference_ema_every: 20
   z0_clamp_min: -50.0  # z0 anchor clamp 범위(APO 원문 방식, 대칭). 근거: EXP-10.md "z0 clamp" 절.
   z0_clamp_max: 50.0
+  z0_clamp_auto: false  # true면 학습 시작 전 1epoch(backward 없음)로 이번 라운드 실제
+                         # 데이터의 z0 분포를 실측해 z0_clamp_min/max를 자동으로 재설정한다
+                         # (위 z0_clamp_min/max는 무시됨). ±50이 한 번도 안 걸려 사실상
+                         # 안전장치가 없던 문제(2026-07-28 "5차 시도"에서 "다음 라운드에
+                         # 실측 기반으로 좁히자"고 계획했다가 안 지켜짐) + 라운드마다
+                         # 데이터가 달라 고정 상수 하나로는 안 맞을 수 있다는 점(2026-08-07
+                         # 밤, 사용자 지시) 둘 다 해결. z0는 reward_std와 달리 step에 따라
+                         # 크게 안 변한다는 실측(corr(step,|z0|)=-0.20) 근거로 1epoch 샘플만
+                         # 씀. diffusion_trainer.py `_calibrate_z0_clamp` 참고, EXP-10.md
+                         # 2026-08-07 밤 절.
+  z0_clamp_calib_percentile: 99.0  # z0_clamp_auto=true일 때 쓰는 percentile.
   use_lora: true  # 2026-07-30: 초기 구현부터 LoRA를 표준 경로로 채택(APO 원문도 항상 true) —
                    # 기존엔 기본값 false라 override 안 하면 조용히 비-LoRA(6차 이전과 같은 실패
                    # 조건)로 재현되는 함정이 있었음, 그래서 기본값 자체를 바꿈.
