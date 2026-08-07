@@ -136,7 +136,14 @@ class APOKTOLoss:
             reward_reject = reward
         z0_source = mismatch_reward if mismatch_reward is not None else reward
         # 대칭 clamp(APO 원문 방식) — 근거: EXP-10.md "z0 clamp" 절.
-        z0 = z0_source.detach().mean().clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
+        z0_raw = z0_source.detach().mean()
+        z0 = z0_raw.clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
+        # clamp 전 값을 별도로 남긴다(2026-08-08) — clamp가 걸리면 그 이후로는 z0 로그가
+        # 전부 경계값(예: 0.000)으로만 찍혀서 "clamp이 없었다면 얼마나 더 내려갔을지"가
+        # 영영 안 보이는 문제가 있었음(EXP-10.md 2026-08-08 절). z0_clamped_frac은 그
+        # 배치가 실제로 clamp에 걸렸는지(0/1) — 여러 배치에 걸쳐 평균 내면 "학습의 몇 %가
+        # clamp 경계에 눌려있었는지"를 바로 알 수 있다.
+        _z0_raw_val = float(z0_raw.item())
 
         mask = _desirable_mask(action_mode_window, preference_frames=self.preference_frames)
         sample_weight = weight.mean(dim=1)  # (B,T) -> (B,) — class_based처럼 T별로 다르면 평균
@@ -207,6 +214,10 @@ class APOKTOLoss:
             reward_chosen_mean=float(chosen_reward.detach().mean().item()) if n_chosen else float("nan"),
             reward_rejected_mean=float(rejected_reward.detach().mean().item()) if n_rejected else float("nan"),
             z0=float(z0.item()),
+            z0_raw=_z0_raw_val,
+            z0_clamped=float(
+                _z0_raw_val < self.z0_clamp_min or _z0_raw_val > self.z0_clamp_max
+            ),
             reward_min=float(reward.detach().min().item()),
             reward_max=float(reward.detach().max().item()),
             reward_std=float(reward.detach().std().item()) if reward.numel() > 1 else 0.0,
