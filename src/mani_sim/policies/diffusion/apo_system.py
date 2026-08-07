@@ -310,6 +310,13 @@ class ApoSystem:
             log_probs, ref_log_probs, weight, action_mode, mismatch_reward=mismatch_reward,
             log_probs_reject=log_probs_reject, ref_log_probs_reject=ref_log_probs_reject,
         )
+        # 배치의 랜덤 diffusion timestep 분포(2026-08-08 추가) — grad_norm 스파이크가
+        # reward/mse 집계 지표와는 무관하다는 게 실측으로 반증돼서(EXP-10.md 2026-08-07 밤
+        # 절), 지금까지 한 번도 로깅 안 한 남은 후보(작은 t=고-SNR=가파른 loss landscape일
+        # 수 있음)를 확인하기 위함.
+        metrics["t_min"] = int(timesteps.min().item())
+        metrics["t_mean"] = float(timesteps.float().mean().item())
+        metrics["t_max"] = int(timesteps.max().item())
 
         des = _desirable_mask(action_mode, preference_frames=self.kto_loss.preference_frames)
 
