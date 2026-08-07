@@ -249,6 +249,16 @@ class ApoSystem:
                     mismatch_reward = (-mismatch_model_mse * mismatch_mask).sum(dim=1) - (
                         -mismatch_ref_mse * mismatch_mask
                     ).sum(dim=1)
+                    # z0(=mismatch_reward 평균)가 reward_chosen보다 4~5배 큰 현상의 원인을
+                    # 분해하기 위한 진단(2026-08-08 추가). z0가 큰 게 (a) 모델이 mismatch에서
+                    # 정말 많이 개선돼서인지 (b) reference가 mismatch에서 워낙 나빠 개선
+                    # 여지가 컸던 것인지는 reward(=차이)만으로는 구분이 안 된다 —
+                    # raw 값 양쪽을 다 남겨야 판별 가능(EXP-10.md 2026-08-08 절).
+                    _mm_denom = mismatch_mask.sum(dim=1).clamp(min=1.0)
+                    self._diag_mismatch = (
+                        float(((mismatch_model_mse * mismatch_mask).sum(dim=1) / _mm_denom).mean().item()),
+                        float(((mismatch_ref_mse * mismatch_mask).sum(dim=1) / _mm_denom).mean().item()),
+                    )
 
         if self.weighting is not None:
             if self.weight_ref_timestep is not None:
@@ -314,6 +324,8 @@ class ApoSystem:
         # reward/mse 집계 지표와는 무관하다는 게 실측으로 반증돼서(EXP-10.md 2026-08-07 밤
         # 절), 지금까지 한 번도 로깅 안 한 남은 후보(작은 t=고-SNR=가파른 loss landscape일
         # 수 있음)를 확인하기 위함.
+        if getattr(self, "_diag_mismatch", None) is not None:
+            metrics["raw_model_mse_mismatch"], metrics["raw_ref_mse_mismatch"] = self._diag_mismatch
         metrics["t_min"] = int(timesteps.min().item())
         metrics["t_mean"] = float(timesteps.float().mean().item())
         metrics["t_max"] = int(timesteps.max().item())
