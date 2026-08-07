@@ -259,6 +259,26 @@ class ApoSystem:
                         float(((mismatch_model_mse * mismatch_mask).sum(dim=1) / _mm_denom).mean().item()),
                         float(((mismatch_ref_mse * mismatch_mask).sum(dim=1) / _mm_denom).mean().item()),
                     )
+                    # z0 추정량(mismatch reward)이 rejected 억제에 오염되는지 확인하기 위한
+                    # 진단(2026-08-08 추가). torch.roll(action, -1)이 만드는 mismatch pair의
+                    # ~25%는 undesirable(rejected) action을 그대로 가져온다 — 그 action이
+                    # loss로 억제되면 mismatch_model_mse도 같이 올라가 z0를 끌어내릴 수 있다.
+                    # KTO가 mismatch 앵커를 쓰는 이유는 "chosen/rejected reward와 독립인
+                    # 기준선"이 필요해서인데, 배치 내 roll이 그 독립성을 깨고 있을 가능성 —
+                    # desirable-donor/undesirable-donor로 나눠 평균을 분리해야 판별 가능
+                    # (EXP-10.md 2026-08-08 절). 여기 없으면 나중에 이 로그 자체가 없어서
+                    # 그 시점 데이터로는 재구성이 안 된다(raw_ref_mse_mismatch 사례와 동일 이유).
+                    donor_desirable = _desirable_mask(
+                        action_mode, preference_frames=self.kto_loss.preference_frames
+                    )
+                    donor_desirable_rolled = torch.roll(donor_desirable, shifts=-1)
+                    _per_model_mse = (mismatch_model_mse * mismatch_mask).sum(dim=1) / _mm_denom
+                    _des_n = donor_desirable_rolled.float().sum().clamp(min=1.0)
+                    _undes_n = (~donor_desirable_rolled).float().sum().clamp(min=1.0)
+                    self._diag_mismatch_by_donor = (
+                        float((_per_model_mse * donor_desirable_rolled.float()).sum().item() / _des_n),
+                        float((_per_model_mse * (~donor_desirable_rolled).float()).sum().item() / _undes_n),
+                    )
 
         if self.weighting is not None:
             if self.weight_ref_timestep is not None:
@@ -326,6 +346,10 @@ class ApoSystem:
         # 수 있음)를 확인하기 위함.
         if getattr(self, "_diag_mismatch", None) is not None:
             metrics["raw_model_mse_mismatch"], metrics["raw_ref_mse_mismatch"] = self._diag_mismatch
+        if getattr(self, "_diag_mismatch_by_donor", None) is not None:
+            metrics["raw_model_mse_mismatch_desirable_donor"], metrics["raw_model_mse_mismatch_undesirable_donor"] = (
+                self._diag_mismatch_by_donor
+            )
         metrics["t_min"] = int(timesteps.min().item())
         metrics["t_mean"] = float(timesteps.float().mean().item())
         metrics["t_max"] = int(timesteps.max().item())
