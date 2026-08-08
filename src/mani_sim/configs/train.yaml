@@ -142,6 +142,11 @@ system:
                        # (base가 잘하던 reach가 8회 시도 전부에서 무너짐, weighting 축 유무와
                        # 무관) — desirable 샘플에 표준 noise-MSE loss를 더해 saturate돼도
                        # "이 행동을 계속 재현하라"는 gradient가 남게 함. 근거: EXP-10.md.
+  hinge_weight: 0.0  # DPOP(arXiv:2402.13228) 스타일(기본 0=꺼짐, 2026-08-08 추가) —
+                     # bc_aux와 달리 model_mse가 ref_mse보다 나쁠 때만 벌점(max(0,·)).
+                     # 같이 켜면 desirable 보호항이 3중(KTO chosen+bc_aux+hinge)이 되므로
+                     # hinge를 쓸 땐 bc_aux_weight=0 권장. 근거: apo_system.py docstring,
+                     # EXP-10.md 2026-08-08 절.
   ars_enabled: false  # 2026-07-30 추가, 원문엔 없는 항(기본 꺼짐) — Adaptive Rejection Scaling.
                        # arXiv:2511.19049(Beyond Reward Margin) 근거: chosen과 구별하기 어려운
                        # rejected 샘플(z0에 가까움)일수록 그 gradient가 chosen 쪽으로 번져

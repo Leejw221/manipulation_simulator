@@ -58,7 +58,7 @@ class ApoSystem:
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
-                 ars_ratio_clip=10.0,
+                 ars_ratio_clip=10.0, hinge_weight=0.0,
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
                  encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
@@ -98,6 +98,19 @@ class ApoSystem:
         원문과 동일한 이름) — losses/apo_loss.py 모듈 docstring 참고(arXiv:2511.19049,
         chosen과 구별하기 어려운 rejected 샘플의 밀어내는 힘을 줄여 spillover로 인한
         chosen 품질 붕괴를 완화).
+
+        hinge_weight(기본 0.0=비활성, 2026-08-08 추가): DPOP(Pal et al., Smaug,
+        arXiv:2402.13228) 스타일 — chosen이 reference보다 **절대적으로 나빠질 때만**
+        벌점을 준다: `max(0, model_mse_chosen - ref_mse_chosen)`(desirable 샘플 평균).
+        KTO의 chosen 항(`1-sigmoid(beta*(r-z0))`)은 r이 z0보다 계속 커지면(=이미 잘함)
+        sigmoid 도함수가 0으로 죽어 그 샘플을 사실상 포기하는데, DPOP hinge는 MSE에
+        선형이라 gradient가 안 죽는다 — 이미 만족된 샘플은 자동으로 hinge도 0(=max(0,·)
+        조건)이라 서로 방해 없이 KTO 위에 얹을 수 있다. `bc_aux_weight`(항상 켜진 절대
+        MSE)와 다른 점은 "reference를 이기면 꺼지는가"뿐 — 같이 켜면 desirable 보호항이
+        (KTO chosen + bc_aux + hinge) 3중이 되므로, hinge를 쓸 땐 `bc_aux_weight=0`을
+        권장(EXP-10.md 2026-08-08 절 논의). (75)절이 발견한 "desirable 샘플 약
+        25~40%가 reward_chosen≤0"이 곧 이 hinge가 활성화되는 비율과 같은 양 —
+        `hinge_active_frac` 메트릭으로 직접 검증 가능해짐.
 
         encoder_lr_scale(기본 0.0=완전 동결, 2026-07-31 추가): use_lora=True일 때도
         policy.encoders(비전 인코더)를 학습 가능하게 풀지 여부 — 0보다 크면 unfreeze하고,
@@ -179,6 +192,7 @@ class ApoSystem:
         # 표준 noise-prediction MSE를 더해, saturate돼도 "이 행동을 계속 재현하라"는 gradient가
         # 남게 한다 — 원문에는 없는 항이며, 우리가 실측으로 특정한 실패 메커니즘을 겨냥한 수정.
         self.bc_aux_weight = bc_aux_weight
+        self.hinge_weight = hinge_weight
 
     @torch.no_grad()
     def update_reference_ema(self, policy, global_step):
@@ -396,6 +410,21 @@ class ApoSystem:
             total_loss = total_loss + self.bc_aux_weight * bc_loss
             metrics["bc_aux_loss"] = bc_loss.item()
 
+        if self.hinge_weight > 0:
+            # DPOP hinge(모듈 docstring 참고) — chosen이 reference보다 절대적으로 나빠질
+            # 때만(model_mse > ref_mse) 벌점. bc_aux와 같은 (B,Tp)->per-sample->그룹평균
+            # 패턴을 재사용하되, ref_mse도 같은 방식으로 마스킹·평균낸 뒤 차이를 clamp.
+            n_des_h = des.float().sum().clamp(min=1.0)
+            per_sample_model_err = (model_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            per_sample_ref_err = (ref_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            hinge_per_sample = (per_sample_model_err - per_sample_ref_err).clamp(min=0.0)
+            hinge_loss = (hinge_per_sample * des.float()).sum() / n_des_h
+            total_loss = total_loss + self.hinge_weight * hinge_loss
+            metrics["hinge_loss"] = hinge_loss.item()
+            metrics["hinge_active_frac"] = float(
+                ((hinge_per_sample > 0).float() * des.float()).sum().item() / n_des_h.item()
+            )
+
         # raw(=reference와 무관한 절대) MSE — reward(=ref-model 상대값)만으로는 "정말 model이
         # desirable에서 정밀해지고 undesirable에서 뭉툭해지는지" 직접 볼 수 없다(EXP-10.md
         # 2026-07-30 밤 "z0 공유로 인한 비대칭 결합" 절 — LoRA 저랭크 제약 때문에 두 그룹을
@@ -437,6 +466,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         lora_rank=sys_cfg.get("lora_rank", 32),
         lora_alpha=sys_cfg.get("lora_alpha", 16),
         bc_aux_weight=sys_cfg.get("bc_aux_weight", 0.0),
+        hinge_weight=sys_cfg.get("hinge_weight", 0.0),
         z0_method=sys_cfg.get("z0_method", "match"),
         ars_enabled=sys_cfg.get("ars_enabled", False),
         ars_k1=sys_cfg.get("ars_k1", 1.0),
