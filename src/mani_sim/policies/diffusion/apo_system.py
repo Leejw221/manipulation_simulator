@@ -244,6 +244,7 @@ class ApoSystem:
         # apo_system.py 모듈 docstring/EXP-10.md 2026-07-30 절 참고.
         # mismatch일 땐 KL 항 역전파 안 함(원문 "we do not back-propagate through the KL term").
         mismatch_reward = None
+        mismatch_reward_reject = None
         if self.z0_method == "mismatch":
             with torch.no_grad():
                 if B > 1:
@@ -251,11 +252,23 @@ class ApoSystem:
                     mismatch_mask = mask * torch.roll(mask, shifts=-1, dims=0)
                     mismatch_noisy = scheduler.add_noise(mismatch_action, noise, timesteps)
                     mismatch_pred = policy.unet(mismatch_noisy, timesteps, cond)
-                    mismatch_model_mse = F.mse_loss(mismatch_pred, noise, reduction="none").mean(dim=-1)
+                    mismatch_sq_err = F.mse_loss(mismatch_pred, noise, reduction="none")
+                    mismatch_model_mse = mismatch_sq_err.mean(dim=-1)
                     mismatch_ref_pred = self.reference.unet(mismatch_noisy, timesteps, ref_cond)
-                    mismatch_ref_mse = F.mse_loss(mismatch_ref_pred, noise, reduction="none").mean(dim=-1)
+                    mismatch_ref_sq_err = F.mse_loss(mismatch_ref_pred, noise, reduction="none")
+                    mismatch_ref_mse = mismatch_ref_sq_err.mean(dim=-1)
                     mismatch_reward = (-mismatch_model_mse * mismatch_mask).sum(dim=1) - (
                         -mismatch_ref_mse * mismatch_mask
+                    ).sum(dim=1)
+                    # margin_rejected 전용 앵커 — gripper 제외(rejected_reward와 같은 단위,
+                    # apo_loss.py compute()의 mismatch_reward_reject 참고, 2026-08-08 발견한
+                    # 단위 불일치 수정). U-Net 재forward 없이 위에서 이미 계산한
+                    # mismatch_sq_err/mismatch_ref_sq_err에서 gripper 차원만 빼고 다시
+                    # 평균낸 것 — 추가 비용 없음.
+                    mismatch_model_mse_reject = mismatch_sq_err[..., gripper_free].mean(dim=-1)
+                    mismatch_ref_mse_reject = mismatch_ref_sq_err[..., gripper_free].mean(dim=-1)
+                    mismatch_reward_reject = (-mismatch_model_mse_reject * mismatch_mask).sum(dim=1) - (
+                        -mismatch_ref_mse_reject * mismatch_mask
                     ).sum(dim=1)
                     # z0(=mismatch_reward 평균)가 reward_chosen보다 4~5배 큰 현상의 원인을
                     # 분해하기 위한 진단(2026-08-08 추가). z0가 큰 게 (a) 모델이 mismatch에서
@@ -354,6 +367,7 @@ class ApoSystem:
         total_loss, metrics = self.kto_loss.compute(
             log_probs, ref_log_probs, weight, action_mode, mismatch_reward=mismatch_reward,
             log_probs_reject=log_probs_reject, ref_log_probs_reject=ref_log_probs_reject,
+            mismatch_reward_reject=mismatch_reward_reject,
         )
         # 배치의 랜덤 diffusion timestep 분포(2026-08-08 추가) — grad_norm 스파이크가
         # reward/mse 집계 지표와는 무관하다는 게 실측으로 반증돼서(EXP-10.md 2026-08-07 밤

@@ -117,7 +117,7 @@ class APOKTOLoss:
         self.ars_ratio_clip = ars_ratio_clip
 
     def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None,
-                log_probs_reject=None, ref_log_probs_reject=None):
+                log_probs_reject=None, ref_log_probs_reject=None, mismatch_reward_reject=None):
         """log_probs, ref_log_probs, weight: (B, T) — 패딩 프레임은 호출부가 미리 0으로
         마스킹해서 넘긴다(합산에서 자동 제외). action_mode_window: (B, W), W>=preference_frames.
         mismatch_reward: (B,) 또는 None — z0_method="mismatch"일 때 호출부(apo_system.py)가
@@ -126,6 +126,12 @@ class APOKTOLoss:
         버그가 아니라 명시적으로 선택 가능한 옵션이다, 2026-07-30).
         log_probs_reject/ref_log_probs_reject: (B, T) 또는 None — undesirable(reject) reward
         전용 입력(APO Appendix C, gripper 제외). None이면 log_probs/ref_log_probs를 그대로 씀.
+        mismatch_reward_reject: (B,) 또는 None — margin_rejected 전용 앵커(gripper 제외
+        mismatch reward, z0_method="mismatch"일 때만 호출부가 넘김). **z0(=margin_chosen의
+        앵커)는 gripper 포함(chosen_reward와 같은 단위)인데, rejected_reward는 gripper
+        제외라서 같은 z0를 margin_rejected에 그대로 쓰면 두 항이 다른 단위를 빼는 셈이었다**
+        (외부 리뷰로 발견, EXP-10.md 2026-08-08 (82)절 — chosen 쪽은 원래도 일치해서
+        영향 없었음). None이면(z0_method="match"/"zero") 기존처럼 z0를 그대로 재사용.
 
         반환: (scalar loss, dict 진단 지표).
         """
@@ -144,6 +150,10 @@ class APOKTOLoss:
         # 배치가 실제로 clamp에 걸렸는지(0/1) — 여러 배치에 걸쳐 평균 내면 "학습의 몇 %가
         # clamp 경계에 눌려있었는지"를 바로 알 수 있다.
         _z0_raw_val = float(z0_raw.item())
+
+        z0_reject_source = mismatch_reward_reject if mismatch_reward_reject is not None else z0_source
+        z0_reject_raw = z0_reject_source.detach().mean()
+        z0_reject = z0_reject_raw.clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
 
         mask = _desirable_mask(action_mode_window, preference_frames=self.preference_frames)
         sample_weight = weight.mean(dim=1)  # (B,T) -> (B,) — class_based처럼 T별로 다르면 평균
@@ -165,7 +175,7 @@ class APOKTOLoss:
         chosen_weight = chosen_weight_raw / max(chosen_weight_sum, 1e-8) * n_chosen if n_chosen else chosen_weight_raw
 
         rejected_reward = reward_reject[~mask]
-        margin_rejected = z0 - rejected_reward  # 클수록(양수) 그 rejected 샘플이 z0보다 명확히 나쁨=안전
+        margin_rejected = z0_reject - rejected_reward  # 클수록(양수) 그 rejected 샘플이 z0보다 명확히 나쁨=안전
         margin = margin_rejected  # 기존 이름(ARS 계산에서 그대로 사용) 유지
         rejected_util = torch.sigmoid(self.beta * margin_rejected)  # ars 적용 전 utility 항
         if self.ars_enabled:
@@ -218,6 +228,7 @@ class APOKTOLoss:
             z0_clamped=float(
                 _z0_raw_val < self.z0_clamp_min or _z0_raw_val > self.z0_clamp_max
             ),
+            z0_reject=float(z0_reject.item()),
             reward_min=float(reward.detach().min().item()),
             reward_max=float(reward.detach().max().item()),
             reward_std=float(reward.detach().std().item()) if reward.numel() > 1 else 0.0,
