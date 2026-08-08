@@ -147,6 +147,12 @@ system:
                        # (base가 잘하던 reach가 8회 시도 전부에서 무너짐, weighting 축 유무와
                        # 무관) — desirable 샘플에 표준 noise-MSE loss를 더해 saturate돼도
                        # "이 행동을 계속 재현하라"는 gradient가 남게 함. 근거: EXP-10.md.
+  reward_reduction: sum  # sum(기존) | mean. reward를 예측 프레임 축으로 합할지 평균낼지.
+                     # Diffusion-KTO 공식 코드는 mean이라 mean이 원문 정합 — sum은 APO 관행
+                     # (토큰 로그확률 합, 결합 로그우도라 가법적으로 정당)을 MSE에 옮겨온 것.
+                     # 실효과: 유효 프레임 수가 다른 샘플 간 편향 제거. 프레임이 꽉 찬 샘플끼리는
+                     # (mean, beta=Tp) == (sum, beta=1)이므로 mean으로 바꿀 땐 beta도 같이
+                     # 재조정해야 같은 레짐이 유지된다(EXP-10.md 2026-08-08 절).
   hinge_weight: 0.0  # DPOP(arXiv:2402.13228) 스타일(기본 0=꺼짐, 2026-08-08 추가) —
                      # bc_aux와 달리 model_mse가 ref_mse보다 나쁠 때만 벌점(max(0,·)).
                      # 같이 켜면 desirable 보호항이 3중(KTO chosen+bc_aux+hinge)이 되므로

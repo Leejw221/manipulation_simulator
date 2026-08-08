@@ -104,8 +104,19 @@ class APOKTOLoss:
         ars_k1=1.0,
         ars_eps=1e-4,
         ars_ratio_clip=10.0,
+        reward_reduction="sum",
     ):
         self.beta = beta
+        # reward를 프레임 축으로 어떻게 집계하는가. "sum"(기존) | "mean"(유효 프레임 평균).
+        # Diffusion-KTO 공식 코드는 mean(`model_losses.mean(dim=list(range(1, ndim)))`)이고
+        # 우리 diffusion 다리가 그쪽이므로 mean이 원문 정합이다 — sum은 APO 관행(토큰
+        # 로그확률 합, 결합 로그우도라 가법적으로 정당)을 MSE에 잘못 옮겨온 것.
+        # 실질 효과: 유효 프레임 수가 샘플마다 다를 때 sum은 "프레임이 몇 개냐"를 reward에
+        # 섞는데 mean은 안 섞는다. 프레임이 꽉 찬 샘플끼리는 (mean, beta=Tp)와
+        # (sum, beta=1)이 수학적으로 동일하므로, mean으로 바꿀 땐 beta를 같이 재조정해야
+        # 같은 레짐이 유지된다(EXP-10.md 2026-08-08 절).
+        assert reward_reduction in ("sum", "mean"), f"reward_reduction={reward_reduction!r} 미지원"
+        self.reward_reduction = reward_reduction
         self.desirable_weight = desirable_weight
         self.undesirable_weight = undesirable_weight
         self.preference_frames = preference_frames
@@ -117,7 +128,8 @@ class APOKTOLoss:
         self.ars_ratio_clip = ars_ratio_clip
 
     def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None,
-                log_probs_reject=None, ref_log_probs_reject=None, mismatch_reward_reject=None):
+                log_probs_reject=None, ref_log_probs_reject=None, mismatch_reward_reject=None,
+                frame_mask=None):
         """log_probs, ref_log_probs, weight: (B, T) — 패딩 프레임은 호출부가 미리 0으로
         마스킹해서 넘긴다(합산에서 자동 제외). action_mode_window: (B, W), W>=preference_frames.
         mismatch_reward: (B,) 또는 None — z0_method="mismatch"일 때 호출부(apo_system.py)가
@@ -135,9 +147,17 @@ class APOKTOLoss:
 
         반환: (scalar loss, dict 진단 지표).
         """
-        reward = log_probs.sum(dim=1) - ref_log_probs.sum(dim=1)  # (B,)
+        def _agg(x):
+            """프레임 축 집계 — reward_reduction="mean"이고 frame_mask가 주어지면 유효
+            프레임 수로 나눈다(패딩 샘플의 reward가 프레임 수에 비례해 작아지는 편향 제거)."""
+            s = x.sum(dim=1)
+            if self.reward_reduction == "mean" and frame_mask is not None:
+                return s / frame_mask.sum(dim=1).clamp(min=1.0)
+            return s
+
+        reward = _agg(log_probs) - _agg(ref_log_probs)  # (B,)
         if log_probs_reject is not None:
-            reward_reject = log_probs_reject.sum(dim=1) - ref_log_probs_reject.sum(dim=1)
+            reward_reject = _agg(log_probs_reject) - _agg(ref_log_probs_reject)
         else:
             reward_reject = reward
         z0_source = mismatch_reward if mismatch_reward is not None else reward
