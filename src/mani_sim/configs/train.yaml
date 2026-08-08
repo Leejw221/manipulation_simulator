@@ -58,6 +58,11 @@ weighting:
   beta_d: 1.0             # action_error 전용
   beta_u: 1.0
   gamma: 1.0
+  ref_timestep: null       # action_error 전용(system.kind=null인 sirius 경로). null이면 기존
+  # 동작(학습 손실과 같은 샘플별 랜덤 t의 오차를 그대로 가중치 계산에 씀 — t에 따라 오차가
+  # 100배 달라져 가중치가 "어려운 샘플"이 아니라 "뽑힌 t"를 반영하는 문제가 있음). 정수를
+  # 주면 가중치 계산만 그 t에서 별도 forward. system.kind=apo 경로의 system.weight_ref_timestep과
+  # 같은 처방 — 근거는 diffusion_trainer.py 해당 분기 주석 및 EXP-10.md 2026-07-31 절.
   kappa: auto              # rabc 전용 — "이미 충분히 좋은 진행" 임계값. "auto"면 이 데이터셋의
   # 실측 delta_mean으로 자동 설정(2026-07-22 수정, RABCWeight 참고) — 고정값 0.01(SARM 논문
   # 기본값)을 그대로 쓰면 episode 길이/chunk_size 비율이 다른 task에서 대부분 chunk가

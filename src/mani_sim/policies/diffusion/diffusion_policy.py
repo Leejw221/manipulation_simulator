@@ -71,11 +71,13 @@ class DiffusionPolicyLowDim(nn.Module):
         구분 없이 쓸 수 있게 하는 공통 인터페이스(DiffusionPolicyImage._encode와 대응)."""
         return _flatten_obs(obs, self.obs_keys)
 
-    def compute_loss(self, batch, reduction="mean"):
+    def compute_loss(self, batch, reduction="mean", timesteps=None):
         """batch: {'obs': {key: (B,To,Dk)}, 'action': (B,Tp,Da), 'action_mask': (B,Tp)} (전부 정규화된 값).
 
         reduction="mean" → 스칼라. reduction="none" → 샘플별 스칼라 (B,)
-        (BCRNNPolicyLowDim.compute_loss와 동일 관례 — SIRIUS류 외부 가중치 결합용)."""
+        (BCRNNPolicyLowDim.compute_loss와 동일 관례 — SIRIUS류 외부 가중치 결합용).
+
+        timesteps: (B,) 또는 None(기본, 샘플별 랜덤 t). diffusion_policy_image.py와 동일 관례."""
         obs = batch["obs"]
         action = batch["action"]
         action_mask = batch["action_mask"]
@@ -85,9 +87,10 @@ class DiffusionPolicyLowDim(nn.Module):
         batch_size = action.shape[0]
         device = action.device
         noise = torch.randn_like(action)
-        timesteps = torch.randint(
-            0, self.train_scheduler.config.num_train_timesteps, (batch_size,), device=device
-        ).long()
+        if timesteps is None:
+            timesteps = torch.randint(
+                0, self.train_scheduler.config.num_train_timesteps, (batch_size,), device=device
+            ).long()
         noisy_action = self.train_scheduler.add_noise(action, noise, timesteps)
 
         pred_noise = self.unet(noisy_action, timesteps, global_cond)

@@ -156,15 +156,20 @@ class DiffusionPolicyImage(nn.Module):
         래퍼가 LowDim/Image를 구분 없이 쓸 수 있게 하는 공통 인터페이스."""
         return self._encode(obs)
 
-    def compute_loss(self, batch, reduction="mean"):
+    def compute_loss(self, batch, reduction="mean", timesteps=None):
         """reduction="mean" → 스칼라. reduction="none" → 샘플별 스칼라 (B,)
-        (BCRNNPolicyLowDim.compute_loss와 동일 관례 — SIRIUS류 외부 가중치 결합용)."""
+        (BCRNNPolicyLowDim.compute_loss와 동일 관례 — SIRIUS류 외부 가중치 결합용).
+
+        timesteps: (B,) 또는 None(기본, 표준 DDPM대로 샘플별 랜덤 t). 값을 주면 그 t를
+        그대로 쓴다 — adaptive weighting이 샘플 간 오차를 비교할 때 t를 고정하기 위한 용도
+        (weighting.ref_timestep, diffusion_trainer.py 참고)."""
         obs, action, action_mask = batch["obs"], batch["action"], batch["action_mask"]
         global_cond = self.get_global_cond(obs)
         noise = torch.randn_like(action)
-        timesteps = torch.randint(
-            0, self.train_scheduler.config.num_train_timesteps, (action.shape[0],), device=action.device
-        ).long()
+        if timesteps is None:
+            timesteps = torch.randint(
+                0, self.train_scheduler.config.num_train_timesteps, (action.shape[0],), device=action.device
+            ).long()
         noisy = self.train_scheduler.add_noise(action, noise, timesteps)
         pred = self.unet(noisy, timesteps, global_cond)
         loss = F.mse_loss(pred, noise, reduction="none")

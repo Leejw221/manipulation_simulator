@@ -458,7 +458,26 @@ class DiffusionTrainer:
                         weight_b = self.weighting.compute_weights(raw_batch["demo_id"], raw_batch["index_in_demo"])
                     else:
                         action_mode = raw_batch["action_mode"].to(self.device)
-                        weight_bt = self.weighting.compute_weights(action_mode, error=per_sample_loss.detach())
+                        # weighting.ref_timestep(기본 null): adaptive weight는 배치 안 샘플들의
+                        # 오차를 서로 비교해 순위를 매기는데, per_sample_loss는 샘플별 랜덤 t라
+                        # 오차 크기가 t에 따라 100배 넘게 달라진다(실측: t=0-9 MSE 0.1485 vs
+                        # t=90-99 0.0012, EXP-10.md 2026-07-31 절). 그러면 순위가 "이 샘플이
+                        # 어려운가"가 아니라 "어떤 t를 뽑았는가"를 반영한다. 값을 주면 가중치
+                        # 계산만 고정 t에서 별도 forward로 구한다(학습 손실은 랜덤 t 그대로).
+                        # system.weight_ref_timestep(apo 경로)과 같은 처방의 sirius 경로판.
+                        ref_t = self.cfg.weighting.get("ref_timestep", None)
+                        if ref_t is None:
+                            error = per_sample_loss.detach()
+                        else:
+                            with torch.no_grad():
+                                t_fixed = torch.full(
+                                    (batch["action"].shape[0],), int(ref_t),
+                                    device=self.device, dtype=torch.long,
+                                )
+                                error = self.policy.compute_loss(
+                                    batch, reduction="none", timesteps=t_fixed
+                                )
+                        weight_bt = self.weighting.compute_weights(action_mode, error=error)
                         weight_b = weight_bt.mean(dim=1)
                     # 배치 평균이 1이 되도록 정규화(=moai_policy WeightedDiffusionPolicy의
                     # `(loss*w).sum()/w.sum()`과 수학적으로 동치). class_based도 포함(2026-07-28
