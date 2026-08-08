@@ -80,11 +80,19 @@ class ApoSystem:
 
         z0_method(기본 "match"): z0(KL anchor) 추정 방식 — "match"(같은 인덱스, 셔플 없이
         배치 reward 평균) | "mismatch"(state는 그대로 두고 action만 다른 샘플 것으로 섞은
-        pair로 추정, KTO 원문 방식). diffusion-kto 공식 코드(`jacklishufan/diffusion-kto`,
-        `train_kto_sd_v1.5.py`)의 `--bce_offset` argparse 기본값은 "none"(=match)이고, 논문
-        결과를 낸 `exps/example.sh`도 이 플래그를 안 넘겨 기본값 그대로 씀[검증-코드,
-        2026-07-30] — mismatch는 U-Net을 2회 더 돌려야 해서 SD 규모에선 비쌌을 것으로 추정.
-        우리 UNet은 작아 두 방식 다 실험 대상(EXP-10.md 2026-07-30 절).
+        pair로 추정, KTO 원문 방식) | "zero"(앵커 없음, z0를 항상 0으로 고정). diffusion-kto
+        공식 코드(`jacklishufan/diffusion-kto`, `train_kto_sd_v1.5.py`)의 `--bce_offset`
+        argparse 기본값은 "none"(=match)이고, 논문 결과를 낸 `exps/example.sh`도 이 플래그를
+        안 넘겨 기본값 그대로 씀[검증-코드, 2026-07-30] — mismatch는 U-Net을 2회 더 돌려야
+        해서 SD 규모에선 비쌌을 것으로 추정. 우리 UNet은 작아 두 방식 다 실험 대상(EXP-10.md
+        2026-07-30 절).
+
+        "zero"는 TRL(HuggingFace) `KTOTrainer`의 `loss_type="apo_zero_unpaired"`와 동일 —
+        Anchored Preference Optimization(D'Oosterlinck et al., arXiv:2408.06266)의 unpaired
+        변종[검증-코드, `trl/trainer/kto_trainer.py` 직접 확인, 2026-08-08]. z0를 배치에서
+        추정하지 않고 상수 0으로 고정하므로, EXP-10.md (65)(84)절이 계속 추적한 "z0가 학습 중
+        하락해서 margin_chosen이 진짜 reward 개선 없이 오른다"는 경로를 구조적으로 차단한다
+        — mismatch pair 계산(U-Net 2회 추가 forward)도 필요 없어 match/mismatch보다 가볍다.
 
         ars_enabled/ars_k1/ars_eps: Adaptive Rejection Scaling(PG-DPO Eq.7 기반, K1/eps는
         원문과 동일한 이름) — losses/apo_loss.py 모듈 docstring 참고(arXiv:2511.19049,
@@ -134,7 +142,7 @@ class ApoSystem:
                     for p in policy.encoders.parameters():
                         p.requires_grad_(True)
 
-        assert z0_method in ("match", "mismatch"), f"z0_method={z0_method!r} 미지원"
+        assert z0_method in ("match", "mismatch", "zero"), f"z0_method={z0_method!r} 미지원"
         self.z0_method = z0_method
 
         # action_error_source: weighting(action_error 축)에 넘길 "오차"의 정의.
@@ -279,6 +287,13 @@ class ApoSystem:
                         float((_per_model_mse * donor_desirable_rolled.float()).sum().item() / _des_n),
                         float((_per_model_mse * (~donor_desirable_rolled).float()).sum().item() / _undes_n),
                     )
+        elif self.z0_method == "zero":
+            # 배치에서 z0를 추정하지 않고 상수 0으로 고정(TRL apo_zero_unpaired와 동일 —
+            # 모듈 docstring 참고). APOKTOLoss.compute는 mismatch_reward가 주어지면 그
+            # detach().mean()을 z0_raw로 쓰므로, 전부-0 텐서를 넘기면 z0_raw=0이 되고
+            # z0_clamp_min<=0<=z0_clamp_max인 한 clamp 후에도 그대로 0 — mismatch pair용
+            # U-Net 추가 forward(2회) 없이 같은 코드 경로를 그대로 재사용한다.
+            mismatch_reward = torch.zeros(B, device=device)
 
         if self.weighting is not None:
             if self.weight_ref_timestep is not None:
