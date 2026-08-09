@@ -313,15 +313,16 @@ def _record_rollout_video(cfg, policy, normalizer, device):
     return np.stack(frames), result["success"]
 
 
-def _log_eval_to_wandb(cfg, metrics, policy=None, normalizer=None, device=None, video_path=None):
+def _log_eval_to_wandb(cfg, metrics, policy=None, normalizer=None, device=None, video_paths=None):
     """이 체크포인트를 만든 학습의 wandb run을 이름으로 찾아 **이어서**(resume) eval 결과를
     기록한다 — 새 run을 만들지 않는다(2026-08-07). wandb_run_name이 프로젝트 안에서 정확히
     일치하는 run이 있어야 하고, 없으면 경고만 남기고 조용히 건너뛴다(eval 자체의 성공/실패와
     분리 — wandb 연동은 부가 기능이지 eval의 필수 조건이 아님).
 
-    video_path가 주어지면(robocasa 경로 - _run_robocasa_eval 참고, 이 conda env에서 env를
-    못 만들어 policy로 직접 못 돌림) 그 mp4 파일을 그대로 wandb.Video에 넘긴다 - policy가
-    주어졌을 때(Square/Transport 등)의 _record_rollout_video 경로와 배타적."""
+    video_paths가 주어지면(robocasa 경로 - _run_robocasa_eval 참고, 이 conda env에서 env를
+    못 만들어 policy로 직접 못 돌림) {카메라이름: mp4경로} 각각을 eval/rollout_video_{카메라}로
+    올린다(2026-08-08, 카메라별로 따로 보고 싶다는 요청) - policy가 주어졌을 때(Square/
+    Transport 등)의 _record_rollout_video 경로와 배타적."""
     if not cfg.get("wandb_run_name", None):
         logger.warning("use_wandb=true인데 wandb_run_name이 없음 - wandb 로깅 건너뜀")
         return
@@ -346,11 +347,15 @@ def _log_eval_to_wandb(cfg, metrics, policy=None, normalizer=None, device=None, 
         "eval/num_episodes": metrics["num_episodes"],
         "eval/checkpoint_path": cfg.checkpoint_path,
     }
-    if cfg.get("wandb_log_video", True) and video_path is not None:
-        try:
-            log_payload["eval/rollout_video"] = wandb.Video(video_path, fps=10, format="mp4")
-        except Exception:
-            logger.exception("rollout 영상 기록 실패(video_path) - 나머지 지표는 그대로 기록하고 계속함")
+    # stage_ge_N(robocasa 전용, _run_robocasa_eval 참고)이 있으면 eval/stage_ge_N으로 같이
+    # 로깅 - 이 누락 때문에 stage>=N 값이 wandb에 한 번도 안 올라가고 있었다(2026-08-08 발견).
+    log_payload.update({f"eval/{k}": v for k, v in metrics.items() if k.startswith("stage_ge_")})
+    if cfg.get("wandb_log_video", True) and video_paths:
+        for cam, path in video_paths.items():
+            try:
+                log_payload[f"eval/rollout_video_{cam}"] = wandb.Video(path, fps=10, format="mp4")
+            except Exception:
+                logger.exception(f"rollout 영상 기록 실패({cam}) - 나머지 지표는 그대로 기록하고 계속함")
     elif cfg.get("wandb_log_video", True) and policy is not None:
         try:
             frames, video_success = _record_rollout_video(cfg, policy, normalizer, device)
@@ -445,26 +450,28 @@ def _run_robocasa_eval(cfg):
     확인) - Square 등과 달리 여기서 재현 불가한 크래시라 포기하고 wandb_log_video로 대체.
 
     wandb 영상은 _record_rollout_video(policy를 이 프로세스에서 직접 굴림)를 못 쓴다(같은
-    이유로 env를 여기서 못 만듦) - 대신 이 서브프로세스 호출 자체에 --save_gif(mp4)를 얹어서
-    성공률 측정과 같은 rollout(episode 0)의 영상을 한 번에 뽑는다(rollout을 두 번 안 돌림)."""
+    이유로 env를 여기서 못 만듦) - 대신 이 서브프로세스 호출 자체에 --video_dir을 얹어서
+    성공률 측정과 같은 rollout(episode 0)의 영상을 카메라별로 한 번에 뽑는다(rollout을
+    두 번 안 돌림). 로컬 저장 위치는 체크포인트 옆 eval_log/<추론 시각>/(사용자 요청,
+    2026-08-08) - wandb 업로드 여부와 무관하게 항상 남는다."""
     import re
     import subprocess
-    import tempfile
+    from datetime import datetime
 
     if cfg.render:
         raise ValueError(
             "robocasa task는 render=true 미지원(세그폴트, 위 docstring 참고) - "
-            "save_gif=path.mp4 또는 wandb_log_video=true를 쓸 것."
+            "wandb_log_video=false로 영상 자체를 끄거나 wandb_log_video=true(기본)를 쓸 것."
         )
 
     stats_path = cfg.stats_path or os.path.join(os.path.dirname(cfg.checkpoint_path), "normalization_stats.json")
     episode_ids = ",".join(str(i) for i in range(cfg.num_episodes))
     num_stages = cfg.task.get("num_stages", None)
 
-    want_wandb_video = cfg.get("use_wandb", False) and cfg.get("wandb_log_video", True)
-    video_path = cfg.save_gif
-    if video_path is None and want_wandb_video:
-        video_path = os.path.join(tempfile.mkdtemp(), "rollout.mp4")
+    video_dir = None
+    if cfg.get("wandb_log_video", True):
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        video_dir = os.path.join(os.path.dirname(cfg.checkpoint_path), "eval_log", timestamp)
 
     cmd = [
         # --no-capture-output 없으면 `conda run`이 자기 내부에서 서브프로세스 출력을 전부 모았다가
@@ -476,8 +483,8 @@ def _run_robocasa_eval(cfg):
     ]
     if num_stages:
         cmd += ["--num_stages", str(num_stages)]
-    if video_path is not None:
-        cmd += ["--save_gif", os.path.abspath(video_path)]
+    if video_dir is not None:
+        cmd += ["--video_dir", os.path.abspath(video_dir)]
 
     scripts_dir = "/home/moai/jungwook_ws/ljw_workspace/robocasa/scripts"
     proc = subprocess.Popen(
@@ -504,8 +511,12 @@ def _run_robocasa_eval(cfg):
         metrics[f"stage_ge_{m.group(1)}"] = float(m.group(2)) / 100.0
 
     if cfg.get("use_wandb", False):
-        used_video = video_path if (want_wandb_video and video_path and os.path.exists(video_path)) else None
-        _log_eval_to_wandb(cfg, metrics, video_path=used_video)
+        video_paths = {}
+        if video_dir is not None and os.path.isdir(video_dir):
+            for fname in sorted(os.listdir(video_dir)):
+                if fname.endswith(".mp4"):
+                    video_paths[fname[:-4]] = os.path.join(video_dir, fname)
+        _log_eval_to_wandb(cfg, metrics, video_paths=video_paths)
     return metrics
 
 
