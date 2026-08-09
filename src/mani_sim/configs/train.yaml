@@ -31,6 +31,17 @@ max_grad_norm: 1.0e9     # 사실상 클리핑 없음(측정만) - plain/SIRIUS 
 num_epochs: 300
 log_every: 50
 ckpt_every_epochs: 25
+
+# 정책 가중치 EMA — Diffusion Policy 공식 학습 레시피(`use_ema: True`)이고 평가도 EMA
+# 가중치로 한다. 기본값은 원문 config 그대로(inv_gamma=1.0, power=0.75, max=0.9999).
+# 2026-08-10까지 누락돼 있었다 — lerobot의 diffusion policy엔 이 필드가 없어서 두 원문이
+# 갈리는 지점을 대조 목록에 못 올렸다(EXP-10 (111), design_deviations #21).
+# policy_epoch*.pt에는 EMA 가중치가, resume_state.pt에는 raw 가중치가 들어간다.
+use_ema: true
+ema_inv_gamma: 1.0
+ema_power: 0.75
+ema_min_value: 0.0
+ema_max_value: 0.9999
 # eval_every_epochs<=0 이면 학습 중 rollout 평가 생략(예: 빠른 스모크).
 eval_every_epochs: 50
 eval_episodes: 10  # 2026-07-30: 20->10, round1 재학습 중간점검 비용 절감 목적으로 기본값 변경.

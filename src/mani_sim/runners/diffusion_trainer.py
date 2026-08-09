@@ -32,6 +32,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from mani_sim.datasets.apo_sampler import build_balanced_sampler, build_interaction_exhaustion_sampler
+from mani_sim.utils.ema import EMAModel
 from mani_sim.datasets.normalization import (
     MinMaxNormalizer, compute_minmax_stats, compute_minmax_stats_zarr, load_stats, save_stats,
 )
@@ -278,6 +279,16 @@ class DiffusionTrainer:
             param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay,
             betas=(0.95, 0.999), eps=1e-8,
         )
+        # 정책 가중치 EMA — DP 공식 레시피(`use_ema: True`)이고 평가도 EMA 가중치로 한다.
+        # 2026-08-10까지 누락돼 있었다(lerobot엔 이 필드가 없어서 대조 목록에서 빠졌음).
+        self.ema = None
+        if cfg.get("use_ema", True):
+            self.ema = EMAModel(
+                self.policy,
+                inv_gamma=cfg.get("ema_inv_gamma", 1.0), power=cfg.get("ema_power", 0.75),
+                min_value=cfg.get("ema_min_value", 0.0), max_value=cfg.get("ema_max_value", 0.9999),
+            )
+
         total_steps = max(cfg.num_epochs * len(self.dataloader), 1)
         warmup_steps = 500
         if total_steps > warmup_steps:
@@ -495,6 +506,8 @@ class DiffusionTrainer:
                 )
                 self.optimizer.step()
                 self.lr_scheduler.step()
+                if self.ema is not None:
+                    self.ema.step(self.policy)
                 if self.system is not None:
                     self.system.update_reference_ema(self.policy, global_step)
 
@@ -524,9 +537,14 @@ class DiffusionTrainer:
                     merge_lora(save_policy.unet)
                     if getattr(self.system, "encoder_lora", False) and hasattr(save_policy, "encoders"):
                         merge_lora(save_policy.encoders)
+                # DP 원문은 평가를 EMA 가중치로 한다 -> policy_epoch*.pt에 EMA를 담아
+                # eval.py가 별도 수정 없이 그대로 쓰게 한다. raw 가중치는 resume_state.pt에 남는다.
+                if self.ema is not None:
+                    save_policy = self.ema.averaged_model
                 path = save_epoch_checkpoint(self.cfg.output_dir, epoch + 1, save_policy)
                 save_resume_state(self.cfg.output_dir, epoch + 1, self.policy, self.optimizer, self.lr_scheduler)
-                logger.info(f"saved checkpoint: {path} (+ resume_state.pt)")
+                logger.info(f"saved checkpoint: {path} (+ resume_state.pt)"
+                            + (f" [EMA decay={self.ema.decay:.5f}]" if self.ema is not None else " [EMA off]"))
 
             if self.cfg.eval_every_epochs > 0 and ((epoch + 1) % self.cfg.eval_every_epochs == 0 or is_last):
                 metrics = self.evaluate(self.cfg.eval_episodes, self.cfg.eval_max_steps)
