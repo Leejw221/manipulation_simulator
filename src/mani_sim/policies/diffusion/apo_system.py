@@ -33,6 +33,7 @@ import copy
 import torch
 import torch.nn.functional as F
 
+from mani_sim.datasets.labels import LABEL_INTV
 from mani_sim.datasets.labels import desirable_mask as _desirable_mask
 from mani_sim.factory import registry
 from mani_sim.losses.apo_loss import APOKTOLoss
@@ -420,15 +421,22 @@ class ApoSystem:
             # DPOP hinge(모듈 docstring 참고) — chosen이 reference보다 절대적으로 나빠질
             # 때만(model_mse > ref_mse) 벌점. bc_aux와 같은 (B,Tp)->per-sample->그룹평균
             # 패턴을 재사용하되, ref_mse도 같은 방식으로 마스킹·평균낸 뒤 차이를 clamp.
-            n_des_h = des.float().sum().clamp(min=1.0)
+            # 적용 대상은 desirable 전체가 아니라 old data(=INTV가 없는 desirable)뿐이다
+            # (2026-08-09). hinge는 "이미 하던 것을 잃지 마라"는 하한이므로, 새로 배워야 하는
+            # INTV correction에 걸면 reference 수준이 학습의 하한이자 사실상 목표가 되어
+            # Acquisition을 방해한다. Cell B(2026-08-08, desirable 전체 적용)와 다른 점.
+            window = action_mode[:, : self.kto_loss.preference_frames]
+            old_mask = (des & ~(window == LABEL_INTV).any(dim=1)).float()
+            n_old = old_mask.sum().clamp(min=1.0)
             per_sample_model_err = (model_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
             per_sample_ref_err = (ref_mse * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
             hinge_per_sample = (per_sample_model_err - per_sample_ref_err).clamp(min=0.0)
-            hinge_loss = (hinge_per_sample * des.float()).sum() / n_des_h
+            hinge_loss = (hinge_per_sample * old_mask).sum() / n_old
             total_loss = total_loss + self.hinge_weight * hinge_loss
             metrics["hinge_loss"] = hinge_loss.item()
+            metrics["hinge_num_old"] = float(n_old.item())
             metrics["hinge_active_frac"] = float(
-                ((hinge_per_sample > 0).float() * des.float()).sum().item() / n_des_h.item()
+                ((hinge_per_sample > 0).float() * old_mask).sum().item() / n_old.item()
             )
 
         # raw(=reference와 무관한 절대) MSE — reward(=ref-model 상대값)만으로는 "정말 model이
