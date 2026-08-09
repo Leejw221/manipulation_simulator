@@ -60,7 +60,7 @@ class ApoSystem:
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
                  ars_ratio_clip=10.0, hinge_weight=0.0, kl_retain_weight=0.0,
-                 reward_reduction="sum",
+                 kl_retain_scope="all", kl_retain_ck=True, reward_reduction="sum",
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
                  encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
@@ -197,6 +197,8 @@ class ApoSystem:
         self.bc_aux_weight = bc_aux_weight
         self.hinge_weight = hinge_weight
         self.kl_retain_weight = kl_retain_weight
+        self.kl_retain_scope = kl_retain_scope
+        self.kl_retain_ck = kl_retain_ck
 
     @torch.no_grad()
     def update_reference_ema(self, policy, global_step):
@@ -442,25 +444,39 @@ class ApoSystem:
             )
 
         if self.kl_retain_weight > 0:
-            # BC retention(정책 수준 앵커) — old data에서 "예전처럼 행동해라".
-            # 유도: 두 조건부 p_theta(A^{k-1}|A^k,S), p_pre(A^{k-1}|A^k,S)는 같은 분산
-            # 스케줄을 공유하는 가우시안이라 KL이 닫힌 형태이고, eps-파라미터화에서
-            # 평균 차이가 eps 예측 차이에 비례한다:
-            #     D_KL = c_k * || eps_theta - eps_ref ||^2
-            # c_k(=beta_k^2 / (2 sigma_k^2 alpha_k (1-alphabar_k)))는 쓰지 않고 균일
-            # 가중을 쓴다 — 우리 손실 전부(reward/bc_aux/hinge)가 이미 L_simple(균일)이라
-            # 단위를 맞춰야 하고, DDPM 원문도 균일 가중이 실측상 낫다고 보고했다.
-            # (이탈로 기록: design_deviations #22)
+            # FDPP(arXiv:2501.08259) Eq.19/20의 KL 정규화를 오프라인으로 이식.
+            # 원문은 두 조건부의 진짜 가우시안 KL을 denoising step마다 합한다:
+            #   D_KL[p_theta(A^{k-1}|A^k,S) || p_pre(A^{k-1}|A^k,S)]
+            #        = ||mu_theta - mu_pre||^2 / (2 sigma_k^2)
+            #        = c_k * ||eps_theta - eps_ref||^2,
+            #   c_k = beta_k / (2 alpha_k (1 - alphabar_{k-1}))     [sigma_k^2 = betatilde_k]
+            # k=1(t=0)에서는 DDPM 관례 sigma_1^2 = beta_1을 따라 분모를 (1-alphabar_1)로 둔다.
+            # 원문과 다른 점(불가피): 원문의 S_t는 정책 롤아웃 상태, A^k는 생성 체인의 중간
+            # 샘플이다(PPO 온라인). 우리는 오프라인이라 데이터 상태·데이터 액션에 노이즈를
+            # 씌운 지점에서 잰다. design_deviations #22.
             # ref_pred는 no_grad라 상수 타깃 — gradient는 policy로만 흐른다.
-            window_kl = action_mode[:, : self.kto_loss.preference_frames]
-            old_mask_kl = (des & ~(window_kl == LABEL_INTV).any(dim=1)).float()
-            n_old_kl = old_mask_kl.sum().clamp(min=1.0)
             kl_per_frame = F.mse_loss(pred, ref_pred, reduction="none").mean(dim=-1)  # (B, Tp)
             kl_per_sample = (kl_per_frame * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
-            kl_loss = (kl_per_sample * old_mask_kl).sum() / n_old_kl
+            if self.kl_retain_ck:
+                ac = scheduler.alphas_cumprod.to(device)
+                a_t = scheduler.alphas.to(device)[timesteps]
+                b_t = scheduler.betas.to(device)[timesteps]
+                ab_prev = ac[(timesteps - 1).clamp(min=0)]
+                denom = torch.where(timesteps > 0, 1.0 - ab_prev, 1.0 - ac[timesteps])
+                c_k = b_t / (2.0 * a_t * denom.clamp(min=1e-8))
+                kl_per_sample = kl_per_sample * c_k
+                metrics["kl_ck_mean"] = float(c_k.mean().item())
+                metrics["kl_ck_max"] = float(c_k.max().item())
+            if self.kl_retain_scope == "old":
+                window_kl = action_mode[:, : self.kto_loss.preference_frames]
+                sel = (des & ~(window_kl == LABEL_INTV).any(dim=1)).float()
+            else:
+                sel = torch.ones_like(kl_per_sample)
+            n_sel = sel.sum().clamp(min=1.0)
+            kl_loss = (kl_per_sample * sel).sum() / n_sel
             total_loss = total_loss + self.kl_retain_weight * kl_loss
             metrics["kl_retain_loss"] = kl_loss.item()
-            metrics["kl_retain_num_old"] = float(n_old_kl.item())
+            metrics["kl_retain_n"] = float(n_sel.item())
 
         # raw(=reference와 무관한 절대) MSE — reward(=ref-model 상대값)만으로는 "정말 model이
         # desirable에서 정밀해지고 undesirable에서 뭉툭해지는지" 직접 볼 수 없다(EXP-10.md
@@ -505,6 +521,8 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         bc_aux_weight=sys_cfg.get("bc_aux_weight", 0.0),
         hinge_weight=sys_cfg.get("hinge_weight", 0.0),
         kl_retain_weight=sys_cfg.get("kl_retain_weight", 0.0),
+        kl_retain_scope=sys_cfg.get("kl_retain_scope", "all"),
+        kl_retain_ck=sys_cfg.get("kl_retain_ck", True),
         reward_reduction=sys_cfg.get("reward_reduction", "sum"),
         z0_method=sys_cfg.get("z0_method", "match"),
         ars_enabled=sys_cfg.get("ars_enabled", False),

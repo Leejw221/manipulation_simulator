@@ -170,7 +170,10 @@ system:
   # 함수와의 거리"다. 근거: Forgetting 논문(arXiv:2402.02868)의 BC retention이
   # State Coverage Gap에 가장 효과적, FDPP(arXiv:2501.08259)가 diffusion policy에서
   # 스텝별 KL 상한으로 같은 것을 구현. 0.0=꺼짐.
-  kl_retain_weight: 0.0  # DPOP(arXiv:2402.13228) 스타일(기본 0=꺼짐, 2026-08-08 추가) —
+  kl_retain_weight: 0.0
+  kl_retain_scope: all   # all(FDPP 원문, 전역) | old(DEMO/ROLLOUT 한정, 우리 변형)
+  kl_retain_ck: true     # true=원문 가우시안 KL 가중 c_k 포함 | false=균일(L_simple 관행)
+  # (아래는 hinge_weight 설명 — DPOP(arXiv:2402.13228) 스타일, 기본 0=꺼짐, 2026-08-08 추가)
                      # bc_aux와 달리 model_mse가 ref_mse보다 나쁠 때만 벌점(max(0,·)).
                      # 같이 켜면 desirable 보호항이 3중(KTO chosen+bc_aux+hinge)이 되므로
                      # hinge를 쓸 땐 bc_aux_weight=0 권장. 근거: apo_system.py docstring,
