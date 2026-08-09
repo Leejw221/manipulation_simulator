@@ -164,7 +164,13 @@ system:
                      # 실효과: 유효 프레임 수가 다른 샘플 간 편향 제거. 프레임이 꽉 찬 샘플끼리는
                      # (mean, beta=Tp) == (sum, beta=1)이므로 mean으로 바꿀 땐 beta도 같이
                      # 재조정해야 같은 레짐이 유지된다(EXP-10.md 2026-08-08 절).
-  hinge_weight: 0.0  # DPOP(arXiv:2402.13228) 스타일(기본 0=꺼짐, 2026-08-08 추가) —
+  hinge_weight: 0.0
+  # BC retention(정책 수준 앵커, 2026-08-10) — old data(DEMO/ROLLOUT, INTV 제외)에서
+  # || eps_theta - eps_ref ||^2. hinge가 "정답 대비 성능의 하한"이라면 이건 "reference
+  # 함수와의 거리"다. 근거: Forgetting 논문(arXiv:2402.02868)의 BC retention이
+  # State Coverage Gap에 가장 효과적, FDPP(arXiv:2501.08259)가 diffusion policy에서
+  # 스텝별 KL 상한으로 같은 것을 구현. 0.0=꺼짐.
+  kl_retain_weight: 0.0  # DPOP(arXiv:2402.13228) 스타일(기본 0=꺼짐, 2026-08-08 추가) —
                      # bc_aux와 달리 model_mse가 ref_mse보다 나쁠 때만 벌점(max(0,·)).
                      # 같이 켜면 desirable 보호항이 3중(KTO chosen+bc_aux+hinge)이 되므로
                      # hinge를 쓸 땐 bc_aux_weight=0 권장. 근거: apo_system.py docstring,

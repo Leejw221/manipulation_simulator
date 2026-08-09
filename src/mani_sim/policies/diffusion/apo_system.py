@@ -59,7 +59,8 @@ class ApoSystem:
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
-                 ars_ratio_clip=10.0, hinge_weight=0.0, reward_reduction="sum",
+                 ars_ratio_clip=10.0, hinge_weight=0.0, kl_retain_weight=0.0,
+                 reward_reduction="sum",
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
                  encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
@@ -195,6 +196,7 @@ class ApoSystem:
         # 남게 한다 — 원문에는 없는 항이며, 우리가 실측으로 특정한 실패 메커니즘을 겨냥한 수정.
         self.bc_aux_weight = bc_aux_weight
         self.hinge_weight = hinge_weight
+        self.kl_retain_weight = kl_retain_weight
 
     @torch.no_grad()
     def update_reference_ema(self, policy, global_step):
@@ -439,6 +441,27 @@ class ApoSystem:
                 ((hinge_per_sample > 0).float() * old_mask).sum().item() / n_old.item()
             )
 
+        if self.kl_retain_weight > 0:
+            # BC retention(정책 수준 앵커) — old data에서 "예전처럼 행동해라".
+            # 유도: 두 조건부 p_theta(A^{k-1}|A^k,S), p_pre(A^{k-1}|A^k,S)는 같은 분산
+            # 스케줄을 공유하는 가우시안이라 KL이 닫힌 형태이고, eps-파라미터화에서
+            # 평균 차이가 eps 예측 차이에 비례한다:
+            #     D_KL = c_k * || eps_theta - eps_ref ||^2
+            # c_k(=beta_k^2 / (2 sigma_k^2 alpha_k (1-alphabar_k)))는 쓰지 않고 균일
+            # 가중을 쓴다 — 우리 손실 전부(reward/bc_aux/hinge)가 이미 L_simple(균일)이라
+            # 단위를 맞춰야 하고, DDPM 원문도 균일 가중이 실측상 낫다고 보고했다.
+            # (이탈로 기록: design_deviations #22)
+            # ref_pred는 no_grad라 상수 타깃 — gradient는 policy로만 흐른다.
+            window_kl = action_mode[:, : self.kto_loss.preference_frames]
+            old_mask_kl = (des & ~(window_kl == LABEL_INTV).any(dim=1)).float()
+            n_old_kl = old_mask_kl.sum().clamp(min=1.0)
+            kl_per_frame = F.mse_loss(pred, ref_pred, reduction="none").mean(dim=-1)  # (B, Tp)
+            kl_per_sample = (kl_per_frame * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            kl_loss = (kl_per_sample * old_mask_kl).sum() / n_old_kl
+            total_loss = total_loss + self.kl_retain_weight * kl_loss
+            metrics["kl_retain_loss"] = kl_loss.item()
+            metrics["kl_retain_num_old"] = float(n_old_kl.item())
+
         # raw(=reference와 무관한 절대) MSE — reward(=ref-model 상대값)만으로는 "정말 model이
         # desirable에서 정밀해지고 undesirable에서 뭉툭해지는지" 직접 볼 수 없다(EXP-10.md
         # 2026-07-30 밤 "z0 공유로 인한 비대칭 결합" 절 — LoRA 저랭크 제약 때문에 두 그룹을
@@ -481,6 +504,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         lora_alpha=sys_cfg.get("lora_alpha", 16),
         bc_aux_weight=sys_cfg.get("bc_aux_weight", 0.0),
         hinge_weight=sys_cfg.get("hinge_weight", 0.0),
+        kl_retain_weight=sys_cfg.get("kl_retain_weight", 0.0),
         reward_reduction=sys_cfg.get("reward_reduction", "sum"),
         z0_method=sys_cfg.get("z0_method", "match"),
         ars_enabled=sys_cfg.get("ars_enabled", False),
