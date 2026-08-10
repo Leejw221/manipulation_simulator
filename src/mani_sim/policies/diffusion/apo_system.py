@@ -61,6 +61,7 @@ class ApoSystem:
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
                  ars_ratio_clip=10.0, hinge_weight=0.0, kl_retain_weight=0.0,
                  kl_retain_scope="all", kl_retain_ck=True, reward_reduction="sum", z0_gripper_free=True,
+                 loss_frames="all",
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
                  encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
@@ -158,6 +159,8 @@ class ApoSystem:
                         p.requires_grad_(True)
 
         assert z0_method in ("match", "mismatch", "zero"), f"z0_method={z0_method!r} 미지원"
+        assert loss_frames in ("all", "preference"), f"loss_frames={loss_frames!r} 미지원"
+        self.loss_frames = loss_frames
         self.z0_method = z0_method
 
         # action_error_source: weighting(action_error 축)에 넘길 "오차"의 정의.
@@ -283,6 +286,16 @@ class ApoSystem:
         ref_mse_ng = ref_sq_err[..., gripper_free].mean(dim=-1)
 
         mask = action_mask.float()
+        if self.loss_frames == "preference":
+            # 라벨 판정 구간과 손실 적용 구간을 일치시킨다(2026-08-11).
+            # desirable_mask()는 앞 preference_frames(8)프레임 다수결로 청크 하나에 이진 라벨을
+            # 붙이는데, reward는 청크 전체(Tp=16)에 걸쳐 계산된다 — 두 구간이 어긋나 있다.
+            # 실측(square_round1_new_merged_k10): rejected로 라벨된 청크에서 실제로 밀어내는
+            # 프레임 중 43.8%가 INTV(사람 교정)다. 앞 8프레임으로 제한하면 8.3%로 떨어진다.
+            # APO 원문은 샘플당 액션이 1개라 이 자유도 자체가 없어 어느 쪽도 원문 근거가 없다 —
+            # 그래서 옵션으로 두고 단일 변수로 검정한다. "all"이 종래 동작.
+            mask = mask.clone()
+            mask[:, self.kto_loss.preference_frames:] = 0.0
 
         # z0(KL anchor) — z0_method="mismatch"면 KTO 원문 방식(state는 그대로 두고 action만
         # 다른 샘플 것으로 섞은 mismatched pair로 별도 추정, KTO paper Implementation 절
@@ -559,6 +572,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         kl_retain_ck=sys_cfg.get("kl_retain_ck", True),
         reward_reduction=sys_cfg.get("reward_reduction", "sum"),
         z0_gripper_free=sys_cfg.get("z0_gripper_free", True),
+        loss_frames=sys_cfg.get("loss_frames", "all"),
         z0_method=sys_cfg.get("z0_method", "match"),
         ars_enabled=sys_cfg.get("ars_enabled", False),
         ars_k1=sys_cfg.get("ars_k1", 1.0),
