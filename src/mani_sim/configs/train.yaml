@@ -115,6 +115,14 @@ system:
                            # 조정할 것. [결정 대기 — 실험 결과로 채울 것]
   preference_frames: 8    # receding-horizon으로 실제 실행되는 앞 8프레임(pred_horizon=16 중)의
                            # 평균 부호로 desirable/undesirable 판정.
+  diag_mismatch_every: 100  # >0이면 이 스텝마다 mismatch 통계(raw_model_mse_mismatch 등)를
+                            # z0_method와 무관하게 계산·로깅한다. 이 지표가 "정책이 관측을
+                            # 제대로 구분하는가"(조건 판별력)를 재는 유일한 수단이고, EXP-10
+                            # (115)절의 0% 붕괴를 진단한 게 이 값이었다 — 그런데 mismatch
+                            # 분기에서만 계산돼 match/zero 런엔 기록이 없었다. U-Net forward
+                            # 2회가 추가되므로 매 스텝은 비싸다(약 +50%): 100스텝마다면
+                            # 오버헤드 0.5% 수준. no_grad이고 새 난수를 안 뽑아 학습 결과엔
+                            # 영향 없음(켠 런과 끈 런을 그대로 비교 가능). 0이면 끔.
   loss_frames: all        # all(기본, 종래) | preference. 손실을 청크 전체(Tp)에 걸지, 라벨을
                            # 정한 앞 preference_frames에만 걸지. 라벨은 앞 8프레임 다수결인데
                            # reward는 16프레임 전체에 계산돼 두 구간이 어긋나 있다 — 실측

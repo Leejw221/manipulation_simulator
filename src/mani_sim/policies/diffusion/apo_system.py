@@ -61,7 +61,7 @@ class ApoSystem:
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
                  ars_ratio_clip=10.0, hinge_weight=0.0, kl_retain_weight=0.0,
                  kl_retain_scope="all", kl_retain_ck=True, reward_reduction="sum", z0_gripper_free=True,
-                 loss_frames="all",
+                 loss_frames="all", diag_mismatch_every=0,
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
                  encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
@@ -161,6 +161,8 @@ class ApoSystem:
         assert z0_method in ("match", "mismatch", "zero"), f"z0_method={z0_method!r} 미지원"
         assert loss_frames in ("all", "preference"), f"loss_frames={loss_frames!r} 미지원"
         self.loss_frames = loss_frames
+        self.diag_mismatch_every = int(diag_mismatch_every)
+        self._diag_step = 0
         self.z0_method = z0_method
 
         # action_error_source: weighting(action_error 축)에 넘길 "오차"의 정의.
@@ -312,7 +314,19 @@ class ApoSystem:
         # mismatch일 땐 KL 항 역전파 안 함(원문 "we do not back-propagate through the KL term").
         mismatch_reward = None
         mismatch_reward_reject = None
-        if self.z0_method == "mismatch":
+        # mismatch 통계(raw_model_mse_mismatch 등)는 "정책이 관측을 제대로 구분하는가"(조건
+        # 판별력)를 재는 유일한 지표다 — EXP-10 (115)절에서 0% 붕괴를 진단한 게 이 값이었다.
+        # 그런데 z0_method="mismatch"일 때만 계산돼서, match/zero로 돌린 런에는 아예 기록이
+        # 없었다. 나중에 그 시점 데이터로 재구성이 안 되므로 **z0_method와 무관하게** 남긴다
+        # (2026-08-11). U-Net forward 2회가 추가되므로 매 스텝이 아니라 diag_mismatch_every
+        # 스텝마다만 — 0이면 완전히 끔. z0에 쓰지 않을 땐 계산 후 None으로 되돌려 손실 경로에
+        # 영향을 주지 않는다. 이 블록은 no_grad이고 새 난수를 뽑지 않아(noise/timesteps/cond를
+        # 재사용) 학습 결과에 영향이 없다 — 켠 런과 끈 런을 그대로 비교할 수 있다.
+        self._diag_step += 1
+        _diag_due = (self.diag_mismatch_every > 0
+                     and self._diag_step % self.diag_mismatch_every == 0)
+        _z0_needs_mismatch = self.z0_method == "mismatch"
+        if _z0_needs_mismatch or _diag_due:
             with torch.no_grad():
                 if B > 1:
                     mismatch_action = torch.roll(action, shifts=-1, dims=0)
@@ -372,7 +386,10 @@ class ApoSystem:
                         float((_per_model_mse * donor_desirable_rolled.float()).sum().item() / _des_n),
                         float((_per_model_mse * (~donor_desirable_rolled).float()).sum().item() / _undes_n),
                     )
-        elif self.z0_method == "zero":
+            if not _z0_needs_mismatch:
+                mismatch_reward = None          # 진단으로만 계산했으므로 z0 경로엔 안 넘긴다
+                mismatch_reward_reject = None
+        if self.z0_method == "zero":
             # 배치에서 z0를 추정하지 않고 상수 0으로 고정(TRL apo_zero_unpaired와 동일 —
             # 모듈 docstring 참고). APOKTOLoss.compute는 mismatch_reward가 주어지면 그
             # detach().mean()을 z0_raw로 쓰므로, 전부-0 텐서를 넘기면 z0_raw=0이 되고
@@ -573,6 +590,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         reward_reduction=sys_cfg.get("reward_reduction", "sum"),
         z0_gripper_free=sys_cfg.get("z0_gripper_free", True),
         loss_frames=sys_cfg.get("loss_frames", "all"),
+        diag_mismatch_every=sys_cfg.get("diag_mismatch_every", 0),
         z0_method=sys_cfg.get("z0_method", "match"),
         ars_enabled=sys_cfg.get("ars_enabled", False),
         ars_k1=sys_cfg.get("ars_k1", 1.0),
