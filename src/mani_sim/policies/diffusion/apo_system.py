@@ -322,6 +322,11 @@ class ApoSystem:
         # 스텝마다만 — 0이면 완전히 끔. z0에 쓰지 않을 땐 계산 후 None으로 되돌려 손실 경로에
         # 영향을 주지 않는다. 이 블록은 no_grad이고 새 난수를 뽑지 않아(noise/timesteps/cond를
         # 재사용) 학습 결과에 영향이 없다 — 켠 런과 끈 런을 그대로 비교할 수 있다.
+        # 계산 안 한 스텝에 직전 값이 그대로 다시 찍히지 않도록 매 스텝 비운다(2026-08-11).
+        # 매 스텝 계산하던 때(z0_method=mismatch 전용)는 항상 최신이라 문제가 없었는데,
+        # 주기 계산으로 바꾸면서 나머지 99스텝이 stale 값을 새 값처럼 로깅하게 됐다.
+        self._diag_mismatch = None
+        self._diag_mismatch_by_donor = None
         self._diag_step += 1
         _diag_due = (self.diag_mismatch_every > 0
                      and self._diag_step % self.diag_mismatch_every == 0)
