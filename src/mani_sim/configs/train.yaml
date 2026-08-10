@@ -115,6 +115,12 @@ system:
                            # 조정할 것. [결정 대기 — 실험 결과로 채울 것]
   preference_frames: 8    # receding-horizon으로 실제 실행되는 앞 8프레임(pred_horizon=16 중)의
                            # 평균 부호로 desirable/undesirable 판정.
+  loss_frames: all        # all(기본, 종래) | preference. 손실을 청크 전체(Tp)에 걸지, 라벨을
+                           # 정한 앞 preference_frames에만 걸지. 라벨은 앞 8프레임 다수결인데
+                           # reward는 16프레임 전체에 계산돼 두 구간이 어긋나 있다 — 실측
+                           # (K=10): rejected 청크가 실제로 밀어내는 프레임 중 43.8%가 INTV
+                           # (사람 교정)이고, preference로 제한하면 8.3%로 떨어진다. APO는
+                           # 샘플당 액션 1개라 이 자유도가 없어 어느 쪽도 원문 근거가 없음.
   sampler_kind: weighted  # weighted(기본, WeightedRandomSampler, "1epoch=len(dataset)" 고정) |
                           # interaction_exhaustion(2026-08-05 추가, 원문처럼 "1epoch=interaction
                           # 소진 시점" — round2처럼 interaction 수가 round1보다 적은 라운드에서
