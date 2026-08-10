@@ -457,6 +457,7 @@ def _run_robocasa_eval(cfg):
     import re
     import subprocess
     from datetime import datetime
+    from pathlib import Path
 
     if cfg.render:
         raise ValueError(
@@ -486,7 +487,10 @@ def _run_robocasa_eval(cfg):
     if video_dir is not None:
         cmd += ["--video_dir", os.path.abspath(video_dir)]
 
-    scripts_dir = "/home/moai/jungwook_ws/ljw_workspace/robocasa/scripts"
+    # 이 파일(.../ljw_workspace/mani_sim/src/mani_sim/scripts/eval.py) 기준 상대 경로 -
+    # 이전엔 "/home/moai/jungwook_ws/..."로 하드코딩돼 pobi/eddy에서만 동작했음(2026-08-09,
+    # 다른 홈 디렉토리 구조의 머신에서 FileNotFoundError로 발견).
+    scripts_dir = str(Path(__file__).resolve().parents[4] / "robocasa" / "scripts")
     proc = subprocess.Popen(
         cmd, cwd=scripts_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
