@@ -66,17 +66,23 @@ def save_epoch_checkpoint(output_dir, epoch, model, extra=None):
 RESUME_STATE_FILENAME = "resume_state.pt"
 
 
-def save_resume_state(output_dir, epoch, model, optimizer, lr_scheduler):
+def save_resume_state(output_dir, epoch, model, optimizer, lr_scheduler, ema=None):
     """재개(resume) 전용 상태 — 고정 파일명으로 매번 덮어쓴다(2026-07-25). AdamW
     optimizer state가 모델 파라미터의 2배 크기라(exp_avg, exp_avg_sq), epoch별
     마일스톤 체크포인트(`policy_epoch<N>.pt`, eval/비교용)에 매번 같이 넣으면 저장이
     N배로 불어난다(실측: 1.1GB→3.3GB/개). resume엔 항상 가장 최근 것 하나만
-    필요하므로 별도 파일 하나에만 둔다."""
+    필요하므로 별도 파일 하나에만 둔다.
+
+    ema를 넘기면 EMA 상태(averaged_model + optimization_step)도 같이 저장한다
+    (2026-08-11 추가). 없으면 resume 시 averaged_model이 init_from 시점에 머문 채
+    decay가 0부터 재램프돼, 저장되는 policy_epoch*.pt의 평균 구간이 의도와 달라진다."""
     os.makedirs(output_dir, exist_ok=True)
     payload = {
         "model": model.state_dict(), "epoch": epoch,
         "optimizer": optimizer.state_dict(), "lr_scheduler": lr_scheduler.state_dict(),
     }
+    if ema is not None:
+        payload["ema"] = ema.state_dict()
     torch.save(payload, os.path.join(output_dir, RESUME_STATE_FILENAME))
 
 

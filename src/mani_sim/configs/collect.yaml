@@ -49,7 +49,7 @@ async_infer: true
 merger_name: overwrite     # overwrite | temporal_ensemble(ACT 스타일 지수가중 평균 - 겹치는
                             # chunk를 부드럽게 섞고 싶으면 이걸로, async_infer=true일 때만 의미 있음)
 te_coeff: 0.01              # merger_name=temporal_ensemble일 때만 사용(클수록 최신 chunk 비중↑)
-preintv_length: 15
+preintv_length: 10  # APO 원문 K=10(Appendix B)
 control_fps: 20            # 실시간 페이싱(Hz). 사람이 보고 개입할 시간 확보 (env 제어주기·PICO 필터 rate와 맞춤)
 render: true               # 사람이 보고 개입하려면 true (화면 필요)
 output_path: data/intervention/${task.name}_round.hdf5  # 2026-07-30: outputs/->data/ 로 이동

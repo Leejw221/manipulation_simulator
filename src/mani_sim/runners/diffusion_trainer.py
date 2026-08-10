@@ -320,6 +320,8 @@ class DiffusionTrainer:
         if resume_state is not None:
             self.policy.load_state_dict(resume_state["model"])
             self.optimizer.load_state_dict(resume_state["optimizer"])
+            if self.ema is not None and resume_state.get("ema") is not None:
+                self.ema.load_state_dict(resume_state["ema"])
             epoch = resume_state["epoch"]
             # lr_scheduler는 저장된 state_dict를 그대로 복원하지 않고 step()으로 진행시킨다 -
             # state_dict에는 T_max(스케줄이 몇 step에 걸쳐 감쇠하는지)도 들어있어서, cfg.num_epochs를
@@ -357,8 +359,11 @@ class DiffusionTrainer:
             self._eval_env = make_eval_env(self.task_cfg)
         extra_obs_fn = self._stage_extra_obs_fn if self._stage_tracker is not None else None
         extra_reset_fn = self._stage_tracker.reset if self._stage_tracker is not None else None
+        # policy_epoch*.pt에 EMA 가중치를 담으므로 학습 중 평가도 EMA로 해야 나중에
+        # 그 체크포인트로 다시 잰 성공률과 같은 모델의 값이 된다(2026-08-11).
+        eval_policy = self.ema.averaged_model if self.ema is not None else self.policy
         metrics = rollout_policy(
-            env=self._eval_env, policy=self.policy, normalizer=self.normalizer,
+            env=self._eval_env, policy=eval_policy, normalizer=self.normalizer,
             obs_keys=task_obs_keys(self.task_cfg), obs_horizon=self.cfg.policy.obs_horizon,
             action_horizon=self.cfg.policy.action_horizon, max_steps=max_steps, num_episodes=num_episodes,
             device=self.device, rgb_keys=self.task_cfg.rgb_keys if self.is_image else (),
@@ -529,20 +534,22 @@ class DiffusionTrainer:
                 # LoRA면 policy_epoch*.pt는 merge된 일반 아키텍처로 저장한다(eval.py 등
                 # LoRA를 모르는 코드가 그대로 불러올 수 있게, 표준 LoRA 배포 방식). resume용
                 # state는 원본(LoRA 구조 유지, 그대로 학습 이어갈 수 있어야 함)을 그대로 쓴다.
-                save_policy = self.policy
+                # DP 원문은 평가를 EMA 가중치로 한다 -> policy_epoch*.pt에 EMA를 담아
+                # eval.py가 별도 수정 없이 그대로 쓰게 한다. raw 가중치는 resume_state.pt에 남는다.
+                # EMA를 먼저 고르고 그 위에 merge_lora를 적용해야 한다(2026-08-11 수정) —
+                # 순서가 반대면 merge된 결과를 EMA가 덮어써서 LoRA 구조 그대로 저장되고,
+                # LoRA를 모르는 eval.py가 load_state_dict에서 키 불일치로 죽는다.
+                save_policy = self.ema.averaged_model if self.ema is not None else self.policy
                 if self.system is not None and getattr(self.system, "use_lora", False):
                     import copy
                     from mani_sim.networks.lora import merge_lora
-                    save_policy = copy.deepcopy(self.policy)
+                    save_policy = copy.deepcopy(save_policy)
                     merge_lora(save_policy.unet)
                     if getattr(self.system, "encoder_lora", False) and hasattr(save_policy, "encoders"):
                         merge_lora(save_policy.encoders)
-                # DP 원문은 평가를 EMA 가중치로 한다 -> policy_epoch*.pt에 EMA를 담아
-                # eval.py가 별도 수정 없이 그대로 쓰게 한다. raw 가중치는 resume_state.pt에 남는다.
-                if self.ema is not None:
-                    save_policy = self.ema.averaged_model
                 path = save_epoch_checkpoint(self.cfg.output_dir, epoch + 1, save_policy)
-                save_resume_state(self.cfg.output_dir, epoch + 1, self.policy, self.optimizer, self.lr_scheduler)
+                save_resume_state(self.cfg.output_dir, epoch + 1, self.policy, self.optimizer,
+                                  self.lr_scheduler, ema=self.ema)
                 logger.info(f"saved checkpoint: {path} (+ resume_state.pt)"
                             + (f" [EMA decay={self.ema.decay:.5f}]" if self.ema is not None else " [EMA off]"))
 

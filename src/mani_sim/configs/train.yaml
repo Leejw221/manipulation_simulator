@@ -104,7 +104,7 @@ system:
                            # 16스텝 MSE 차이 합산이라 스케일 자체가 다르므로, 값을 그대로 베낄 게
                            # 아니라 실측(|beta*(reward-z0)| 중앙값 0.5~2)으로 우리 데이터에서
                            # 직접 잡아야 함 - beta=1.0이 round0 데이터에서 이 기준을 만족했음.
-  z0_method: match  # match(기본) | mismatch. 근거는 apo_system.py 모듈 docstring 참고 —
+  z0_method: match  # match(기본, Diffusion-KTO 공식 `--bce_offset` 기본값 none과 동일) | mismatch. 근거는 apo_system.py 모듈 docstring 참고 —
                      # diffusion-kto 공식 코드 기본값(bce_offset=none)과 동일하게 match를 먼저
                      # 실험하고 mismatch와 비교(EXP-10.md 2026-07-30 절). [결정 대기 — 실험 결과로 채울 것]
   desirable_weight: 1.0
@@ -129,8 +129,14 @@ system:
   reference_ema_enabled: false  # APO·Diffusion-KTO 둘 다 기본값이 reference 고정. 근거: EXP-10.md "6차 시도" 절.
   reference_ema_momentum: 0.999  # enabled=true일 때만 의미 있음(디버깅/재실험용으로 남겨둠).
   reference_ema_every: 20
-  z0_clamp_min: -50.0  # z0 anchor clamp 범위(APO 원문 방식, 대칭). 근거: EXP-10.md "z0 clamp" 절.
-  z0_clamp_max: 50.0
+  z0_clamp_min: 0.0    # KTO 원문 KL 추정량은 `max(0, ·)` 하한만 둔다(논문 p.6 "KL Estimate",
+                       # Diffusion-KTO 공식 `bce_offset=none` 분기도 `kl.clamp(min=0)`).
+                       # KL >= 0이므로 음수 허용은 원문 위배 — 2026-08-11 0.0으로 정정.
+  z0_clamp_max: null   # 상한은 원문 어디에도 없다(KTO 논문 · Diffusion-KTO 공식 코드 세 분기
+                       # 전부 확인, 2026-08-11). null이면 하한만 적용. 과거 10.638은 우리 자체
+                       # percentile 캘리브레이션 산출물이었고 근거가 없었다.
+  z0_gripper_free: true  # 앵커를 gripper 제외 mismatch reward 하나로 통일(APO 공식
+                         # ddp_robotic_trainer.py:201 `policy_KL_logps[:,:-1]`). 상세는 apo_loss.py.
   z0_clamp_auto: false  # true면 학습 시작 후 앞 z0_clamp_calib_steps 동안(clamp는 사실상
                          # 해제한 채) z0를 실측하고, 그 구간이 끝나면 percentile로
                          # z0_clamp_min/max를 확정해 나머지 학습에 적용한다(위
@@ -158,7 +164,7 @@ system:
                        # (base가 잘하던 reach가 8회 시도 전부에서 무너짐, weighting 축 유무와
                        # 무관) — desirable 샘플에 표준 noise-MSE loss를 더해 saturate돼도
                        # "이 행동을 계속 재현하라"는 gradient가 남게 함. 근거: EXP-10.md.
-  reward_reduction: sum  # sum(기존) | mean. reward를 예측 프레임 축으로 합할지 평균낼지.
+  reward_reduction: mean  # sum(기존) | mean. reward를 예측 프레임 축으로 합할지 평균낼지.
                      # Diffusion-KTO 공식 코드는 mean이라 mean이 원문 정합 — sum은 APO 관행
                      # (토큰 로그확률 합, 결합 로그우도라 가법적으로 정당)을 MSE에 옮겨온 것.
                      # 실효과: 유효 프레임 수가 다른 샘플 간 편향 제거. 프레임이 꽉 찬 샘플끼리는

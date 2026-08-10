@@ -105,8 +105,17 @@ class APOKTOLoss:
         ars_eps=1e-4,
         ars_ratio_clip=10.0,
         reward_reduction="sum",
+        z0_gripper_free=True,
     ):
         self.beta = beta
+        # 앵커(z0)를 gripper 제외 mismatch reward로 통일할지(2026-08-11).
+        # APO 공식 코드(`trainer/ddp_robotic_trainer.py:201-216`)는 앵커를 **하나만** 두고
+        # 그것을 gripper 제외로 계산해(`policy_KL_logps[:,:-1]`) chosen/rejected 양쪽 margin에
+        # 똑같이 쓴다. 우리는 2026-08-08(de42b92)에 앵커를 둘로 나눠 chosen 쪽엔 gripper 포함
+        # 앵커를 남겼는데, 그건 원문에 없는 우리 발명이었다. gripper는 엇갈린 쌍에서 특히 크게
+        # 틀려(열림 vs 닫힘) 앵커를 부풀린다 — 실측 z0 5.745(포함) vs 1.245(제외), 78%가 gripper.
+        # False로 두면 이전(2026-08-08~08-10) 동작 그대로.
+        self.z0_gripper_free = z0_gripper_free
         # reward를 프레임 축으로 어떻게 집계하는가. "sum"(기존) | "mean"(유효 프레임 평균).
         # Diffusion-KTO 공식 코드는 mean(`model_losses.mean(dim=list(range(1, ndim)))`)이고
         # 우리 diffusion 다리가 그쪽이므로 mean이 원문 정합이다 — sum은 APO 관행(토큰
@@ -160,10 +169,18 @@ class APOKTOLoss:
             reward_reject = _agg(log_probs_reject) - _agg(ref_log_probs_reject)
         else:
             reward_reject = reward
-        z0_source = mismatch_reward if mismatch_reward is not None else reward
+        # APO 공식은 앵커 하나(gripper 제외)를 chosen/rejected 양쪽에 쓴다 — z0_gripper_free 참고.
+        if self.z0_gripper_free and mismatch_reward_reject is not None:
+            z0_source = mismatch_reward_reject
+        else:
+            z0_source = mismatch_reward if mismatch_reward is not None else reward
         # 대칭 clamp(APO 원문 방식) — 근거: EXP-10.md "z0 clamp" 절.
+        # 상한(z0_clamp_max)은 None이면 안 건다 — KTO 원문/Diffusion-KTO 공식 코드 어디에도
+        # z0 상한 개념이 없다(2026-08-11 전 분기 확인: `none`은 clamp(min=0), 나머지는 clamp 없음).
+        # 우리가 쓰던 10.638은 자체 percentile 캘리브레이션 산출물이었다.
         z0_raw = z0_source.detach().mean()
-        z0 = z0_raw.clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
+        z0 = z0_raw.clamp(min=self.z0_clamp_min) if self.z0_clamp_max is None \
+            else z0_raw.clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
         # clamp 전 값을 별도로 남긴다(2026-08-08) — clamp가 걸리면 그 이후로는 z0 로그가
         # 전부 경계값(예: 0.000)으로만 찍혀서 "clamp이 없었다면 얼마나 더 내려갔을지"가
         # 영영 안 보이는 문제가 있었음(EXP-10.md 2026-08-08 절). z0_clamped_frac은 그
@@ -173,7 +190,8 @@ class APOKTOLoss:
 
         z0_reject_source = mismatch_reward_reject if mismatch_reward_reject is not None else z0_source
         z0_reject_raw = z0_reject_source.detach().mean()
-        z0_reject = z0_reject_raw.clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
+        z0_reject = z0_reject_raw.clamp(min=self.z0_clamp_min) if self.z0_clamp_max is None \
+            else z0_reject_raw.clamp(min=self.z0_clamp_min, max=self.z0_clamp_max)
 
         mask = _desirable_mask(action_mode_window, preference_frames=self.preference_frames)
         sample_weight = weight.mean(dim=1)  # (B,T) -> (B,) — class_based처럼 T별로 다르면 평균
@@ -246,7 +264,8 @@ class APOKTOLoss:
             z0=float(z0.item()),
             z0_raw=_z0_raw_val,
             z0_clamped=float(
-                _z0_raw_val < self.z0_clamp_min or _z0_raw_val > self.z0_clamp_max
+                _z0_raw_val < self.z0_clamp_min
+                or (self.z0_clamp_max is not None and _z0_raw_val > self.z0_clamp_max)
             ),
             z0_reject=float(z0_reject.item()),
             reward_min=float(reward.detach().min().item()),

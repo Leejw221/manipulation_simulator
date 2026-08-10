@@ -60,7 +60,7 @@ class ApoSystem:
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
                  bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
                  ars_ratio_clip=10.0, hinge_weight=0.0, kl_retain_weight=0.0,
-                 kl_retain_scope="all", kl_retain_ck=True, reward_reduction="sum",
+                 kl_retain_scope="all", kl_retain_ck=True, reward_reduction="sum", z0_gripper_free=True,
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
                  encoder_lora=False):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
@@ -185,7 +185,7 @@ class ApoSystem:
             beta=beta, desirable_weight=desirable_weight, undesirable_weight=undesirable_weight,
             preference_frames=preference_frames, z0_clamp_min=z0_clamp_min, z0_clamp_max=z0_clamp_max,
             ars_enabled=ars_enabled, ars_k1=ars_k1, ars_eps=ars_eps, ars_ratio_clip=ars_ratio_clip,
-            reward_reduction=reward_reduction,
+            reward_reduction=reward_reduction, z0_gripper_free=z0_gripper_free,
         )
         self.last_ref_distance = 0.0
         # bc_aux_weight(기본 0=원문 그대로): KTO sigmoid는 이미 reward>z0인 desirable
@@ -216,6 +216,29 @@ class ApoSystem:
             ref_p.mul_(decay).add_(policy_p, alpha=1.0 - decay)
         self.last_ref_distance = sq_dist ** 0.5
 
+    def _reference_cond(self, obs, crop_rng, crop_rng_cuda, device):
+        """reference의 conditioning을 policy와 **같은 크롭**에서 뽑는다(2026-08-11).
+
+        난수 상태를 policy가 크롭을 뽑기 직전으로 되감아 reference의 RandomCrop이 같은 오프셋을
+        고르게 하고, 끝나면 원래 스트림으로 복구해 이후 난수(timestep·noise 등)에 영향을 주지
+        않는다. reference는 train 모드여야 RandomCrop 경로를 탄다."""
+        saved, saved_cuda = torch.get_rng_state(), (
+            torch.cuda.get_rng_state(device) if crop_rng_cuda is not None else None
+        )
+        torch.set_rng_state(crop_rng)
+        if crop_rng_cuda is not None:
+            torch.cuda.set_rng_state(crop_rng_cuda, device)
+        was_training = self.reference.training
+        self.reference.train()
+        try:
+            ref_cond = self.reference.get_global_cond(obs)
+        finally:
+            self.reference.train(was_training)
+            torch.set_rng_state(saved)
+            if saved_cuda is not None:
+                torch.cuda.set_rng_state(saved_cuda, device)
+        return ref_cond
+
     def compute_loss(self, policy, batch, action_mode):
         """batch: {'obs','action','action_mask'} — trainer가 다른 경로와 똑같이 만드는 그대로.
         action_mode: (B, Tp) — trainer가 raw_batch에서 직접 꺼내 넘긴다(다른 가중치 축과 동일
@@ -225,6 +248,17 @@ class ApoSystem:
         obs, action, action_mask = batch["obs"], batch["action"], batch["action_mask"]
         device = action.device
         B = action.shape[0]
+
+        # reward = ref_mse - model_mse는 "같은 관측에서 policy가 reference보다 얼마나 나은가"여야
+        # 하는데, 비전 인코더가 학습 중엔 RandomCrop·평가 중엔 CenterCrop을 쓰므로
+        # (diffusion_policy_image.py `x = self.random_crop(x) if self.training else self.center_crop(x)`)
+        # reference를 eval()로 두면 두 모델이 **서로 다른 크롭을 본다**. 실측(2026-08-11): 가중치가
+        # 100% 동일해도 conditioning이 feature 최댓값의 72%만큼 달라지고, 그 결과 reward가 0이
+        # 아니라 std 0.379(신호 0.489의 78%)의 잡음을 갖는다. 그래서 (1) reference도 train 모드로
+        # 두고 (2) 크롭 난수를 policy 호출 시점으로 되감아 **같은 크롭**을 보게 한다. 이 네트워크엔
+        # dropout이 없고 BatchNorm은 전부 GroupNorm이라, train 모드 전환이 바꾸는 건 크롭뿐이다.
+        crop_rng = torch.get_rng_state()
+        crop_rng_cuda = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
 
         cond = policy.get_global_cond(obs)
         scheduler = policy.train_scheduler
@@ -236,7 +270,7 @@ class ApoSystem:
         sq_err = F.mse_loss(pred, noise, reduction="none")  # (B, Tp, Da)
         model_mse = sq_err.mean(dim=-1)  # (B, Tp)
         with torch.no_grad():
-            ref_cond = self.reference.get_global_cond(obs)
+            ref_cond = self._reference_cond(obs, crop_rng, crop_rng_cuda, device)
             ref_pred = self.reference.unet(noisy, timesteps, ref_cond)
         ref_sq_err = F.mse_loss(ref_pred, noise, reduction="none")
         ref_mse = ref_sq_err.mean(dim=-1)
@@ -524,6 +558,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         kl_retain_scope=sys_cfg.get("kl_retain_scope", "all"),
         kl_retain_ck=sys_cfg.get("kl_retain_ck", True),
         reward_reduction=sys_cfg.get("reward_reduction", "sum"),
+        z0_gripper_free=sys_cfg.get("z0_gripper_free", True),
         z0_method=sys_cfg.get("z0_method", "match"),
         ars_enabled=sys_cfg.get("ars_enabled", False),
         ars_k1=sys_cfg.get("ars_k1", 1.0),

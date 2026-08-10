@@ -30,7 +30,22 @@ from mani_sim.datasets.labels import (
 
 
 def _classify(action_mode_first_frame, action_mode_window=None, preference_frames=8):
-    """build_balanced_sampler와 동일한 correct/interaction/incorrect 판정 로직(공유)."""
+    """build_balanced_sampler와 동일한 correct/interaction/incorrect 판정 로직(공유).
+
+    APO 공식 코드(`dataset/balance_apo_dataset.py`, 2026-08-11 gh로 직접 대조)의 버킷 정의:
+      correct     <- is_expert=True(전문가 데모)  +  is_human==2
+      interaction <- is_human==1
+      incorrect   <- is_human==0(개입 직전 K스텝, 소급 재라벨)
+
+    **주의 — 논문 본문과 코드가 반대다.** 논문 3.1절은 "c_t = 2 represents the action is
+    corrected by human intervention while c_t = 1 denotes the action is executed by policy"라고
+    쓰지만, 코드 로직은 그 반대여야 자기정합적이다:
+      `if is_first_human and is_human == 1:` -> 직전 K스텝을 incorrect로 옮김 (= 1이 개입 시작 신호)
+      `if is_human == 2: is_first_human = True` -> 탐지기 재무장 (= 2가 정책 실행 복귀)
+    즉 코드 기준 **is_human==1 = 사람 개입 · is_human==2 = 정책 실행**이고, 배치 구성은
+    "correct(데모+로봇 액션) 50% / interaction(사람 개입) 25% / incorrect(개입 직전) 25%"가 된다.
+    우리 라벨 대응: DEMO+ROLLOUT -> correct · INTV -> interaction · PREINTV -> incorrect.
+    """
     labels = np.asarray(action_mode_first_frame)
     if action_mode_window is not None:
         window = np.asarray(action_mode_window)[:, :preference_frames]
