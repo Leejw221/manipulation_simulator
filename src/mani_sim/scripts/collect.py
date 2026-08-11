@@ -220,6 +220,13 @@ def _build_robomimic_policy_env(cfg, device):
 def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
+    # env reset(너트 초기 위치) 시퀀스도 고정한다(2026-08-11 추가). 여태 torch만 고정하고
+    # np.random은 안 걸어서 **매 실행마다 초기 조건이 달랐다** — 그래서 배포 수집으로 잰
+    # 개입률을 eval(eval_seed=42의 고정 200개 초기조건)의 성공률과 같은 상황에서 비교할 수
+    # 없었다. 2026-08-10 팀미팅에서 교수님이 지적한 지점("성공률이 올랐는데 개입률이 늘어날
+    # 수가 있나 / 초기 세팅이나 seed나 다 같아야 되는데")이 바로 이것. eval.py와 같은 값을
+    # 주면 같은 초기조건 집합에서 배포하게 된다.
+    np.random.seed(cfg.seed)
 
     policy_kind = cfg.get("policy_kind", "diffusion")
     if policy_kind == "robomimic":

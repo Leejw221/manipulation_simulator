@@ -3,7 +3,12 @@ defaults:
   - policy: diffusion_unet_lowdim
   - _self_
 
-seed: 0
+seed: 42                   # eval.py의 eval_seed 기본값(42)과 **같은 값**이어야 한다 —
+                            # np.random.seed(seed)로 env reset(너트 초기 위치) 시퀀스가 정해지므로,
+                            # 같은 값을 줘야 배포에서 만난 초기조건이 eval의 200개와 같은 집합이 된다.
+                            # 그래야 "같은 상황에서 성공률은 X, 개입률은 Y"를 나란히 말할 수 있다
+                            # (2026-08-10 팀미팅 교수님 지적). 다르면 개입률과 성공률이 서로 다른
+                            # 상황을 재게 되어 비교가 성립하지 않는다.
 device: cuda
 
 # 배포할 정책 종류: diffusion(registry 기반 — cfg.policy_name으로 diffusion_lowdim/diffusion(image)/
