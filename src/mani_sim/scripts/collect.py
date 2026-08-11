@@ -220,13 +220,17 @@ def _build_robomimic_policy_env(cfg, device):
 def main(cfg: DictConfig):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
-    # env reset(너트 초기 위치) 시퀀스도 고정한다(2026-08-11 추가). 여태 torch만 고정하고
-    # np.random은 안 걸어서 **매 실행마다 초기 조건이 달랐다** — 그래서 배포 수집으로 잰
-    # 개입률을 eval(eval_seed=42의 고정 200개 초기조건)의 성공률과 같은 상황에서 비교할 수
-    # 없었다. 2026-08-10 팀미팅에서 교수님이 지적한 지점("성공률이 올랐는데 개입률이 늘어날
-    # 수가 있나 / 초기 세팅이나 seed나 다 같아야 되는데")이 바로 이것. eval.py와 같은 값을
-    # 주면 같은 초기조건 집합에서 배포하게 된다.
-    np.random.seed(cfg.seed)
+    # env_seed(2026-08-11 추가): env reset(너트 초기 위치) 시퀀스를 고정한다. 여태 torch만
+    # 고정하고 np.random은 안 걸어서 **매 실행마다 초기 조건이 달랐고**, 그래서 배포로 잰
+    # 개입률을 eval(eval_seed의 고정 초기조건)의 성공률과 같은 상황에서 비교할 수 없었다.
+    # 2026-08-10 팀미팅 교수님 지적("성공률이 올랐는데 개입률이 늘어날 수가 있나 / 초기
+    # 세팅이나 seed나 다 같아야 되는데")이 바로 이 문제다.
+    #   - 개입률 측정용 배포: eval의 eval_seed와 **같은 값**을 준다 -> 같은 초기조건 집합
+    #   - 학습 데이터 수집: null로 두면 매번 다른 초기조건(데이터 다양성 확보)
+    # eval.py의 eval_seed와 같은 구조(None이면 안 건다).
+    if cfg.get("env_seed", None) is not None:
+        np.random.seed(cfg.env_seed)
+        logger.info(f"env_seed={cfg.env_seed} — env reset(초기 조건) 시퀀스 고정")
 
     policy_kind = cfg.get("policy_kind", "diffusion")
     if policy_kind == "robomimic":
