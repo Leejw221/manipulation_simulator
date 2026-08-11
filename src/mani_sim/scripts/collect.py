@@ -460,6 +460,30 @@ def main(cfg: DictConfig):
         except Exception:
             pass
 
+    # 개입률 요약(2026-08-11 추가) — 교수님 지적(2026-08-10 팀미팅)대로 "같은 초기조건에서
+    # 성공률 X, 개입률 Y"를 나란히 말하려면 이 수치가 필요하다. env_seed를 eval의 eval_seed와
+    # 같은 값으로 주고 save=false로 돌리면, 데이터를 남기지 않고 개입률만 잴 수 있다.
+    # 두 가지를 따로 낸다 — 어느 쪽을 쓸지는 주장에 따라 다르다:
+    #   에피소드 개입률: 개입이 한 번이라도 필요했던 에피소드 비율 ("혼자 못 끝낸 비율")
+    #   프레임 개입률  : 전체 프레임 중 사람이 조종한 비율 ("사람 노동량")
+    if episodes:
+        n_ep = len(episodes)
+        ep_with_intv = sum(1 for ep in episodes if int((ep["action_modes"] == LABEL_INTV).sum()) > 0)
+        n_frames = sum(len(ep["action_modes"]) for ep in episodes)
+        n_intv = sum(int((ep["action_modes"] == LABEL_INTV).sum()) for ep in episodes)
+        n_success = sum(1 for ep in episodes if ep.get("success"))
+        intv_counts = sorted(int((ep["action_modes"] == LABEL_INTV).sum()) for ep in episodes)
+        median_intv = intv_counts[len(intv_counts) // 2]
+        print(
+            "\n=== 개입률 요약 ===\n"
+            f"  에피소드 {n_ep}개 · 성공 {n_success} ({n_success / n_ep:.1%})\n"
+            f"  에피소드 개입률: {ep_with_intv}/{n_ep} ({ep_with_intv / n_ep:.1%})\n"
+            f"  프레임 개입률  : {n_intv}/{n_frames} ({n_intv / max(n_frames, 1):.1%})\n"
+            f"  에피소드당 개입 프레임 중앙값: {median_intv}\n"
+            f"  env_seed={cfg.get('env_seed', None)} "
+            f"({'eval과 같은 초기조건 집합' if cfg.get('env_seed', None) is not None else '⚠ 고정 안 됨 — eval 성공률과 나란히 비교 불가'})"
+        )
+
     if not cfg.save:
         print(f"save=false - 저장 생략(정책+개입 동작 확인용) | 총 에피소드: {len(episodes)}")
     elif _is_piper_task(cfg):
