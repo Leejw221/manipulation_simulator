@@ -1,0 +1,19 @@
+# RoboCasa ScrubCuttingBoard — vanilla(stage 없음) baseline. EXP 3차.
+# 이 task를 고른 이유: 관측만으로 진행도를 알기 어려운 반복 동작 task라 stage가 새 정보를
+# 줄 여지가 있다. 라벨-프리 probe 실측(2026-08-16, 시간구간 6개, 에피소드별 정확도):
+#   ScrubCuttingBoard 0.464±0.112  <  RestockBowls 0.740±0.116 (stage가 무의미했던 task)
+# 데이터: robocasa/scripts/convert_composite_to_zarr.py --labeler label_stages_scrub
+# stage 정의(6단계)는 label_stages_scrub.py docstring이 정본.
+name: scrubboard
+dataset_backend: zarr
+zarr_path: /home/moai/jungwook_ws/ljw_workspace/robocasa/data/scrub_cutting_board.zarr
+env_backend: robocasa
+
+camera_names: [robot0_agentview_left, robot0_agentview_right, robot0_eye_in_hand]
+image_size: 84
+rgb_keys: [robot0_agentview_left_image, robot0_agentview_right_image, robot0_eye_in_hand_image]
+lowdim_keys: [state]
+
+obs_dims:
+  state: 16
+action_dim: 12
