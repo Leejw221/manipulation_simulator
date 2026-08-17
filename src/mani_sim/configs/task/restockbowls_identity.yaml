@@ -1,0 +1,31 @@
+# RoboCasa RestockBowls — stage 라벨이 **정체(무엇을 할 차례)**인 arm. EXP 4차.
+#
+# restockbowls_stage.yaml과 **zarr_path 한 줄만** 다르다. 단계 수도 6개로 같아
+# nn.Embedding(6, 32)까지 동일하다 — 아키텍처·데이터·하이퍼파라미터가 전부 같고
+# 각 프레임에 붙는 숫자의 **의미**만 바뀐다.
+#
+#   진행도(restockbowls_stage): 완료 개수 0~5
+#   정체(여기):                 open_L / open_R / obj1 / obj2 / close_L / close_R
+#
+# 왜 바꾸나: 1·2차 null의 진단이 "관측에 이미 있는 정보를 줬다"였다(관측→진행도 probe
+# 89.34%). 정체 라벨이 추가로 싣는 것은 시연자의 **분기 선택**이고, 그중 보울 선택은
+# 105 데모에서 51:49이며 문 순서와 독립(chi2=0.00)이라 **관측으로 예측할 수 없다.**
+# 즉 관측에 원리적으로 없는 정보를 처음으로 준다.
+#
+# zarr는 make_identity_stage_zarr.py가 만든다 — 이미지/state/action/meta는 원본
+# restockbowls.zarr의 심볼릭 링크이고 stage 배열만 새로 쓴다(6GB 복제 회피 + 학습 코드
+# 무변경). 라벨러가 정체 라벨의 구간 경계가 진행도 라벨과 일치하는지 에피소드마다 assert한다.
+name: restockbowls_identity
+dataset_backend: zarr
+zarr_path: /home/moai/jungwook_ws/ljw_workspace/robocasa/data/restockbowls_identity.zarr
+env_backend: robocasa
+
+camera_names: [robot0_agentview_left, robot0_agentview_right, robot0_eye_in_hand]
+image_size: 84
+rgb_keys: [robot0_agentview_left_image, robot0_agentview_right_image, robot0_eye_in_hand_image]
+lowdim_keys: [state]
+num_stages: 6
+
+obs_dims:
+  state: 16
+action_dim: 12
