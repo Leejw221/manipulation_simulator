@@ -66,6 +66,7 @@ save_every: 250
 # 로 적용. reference 모델+KTO가 필요하면 아래 system.kind=apo를 켤 것(weighting은 그대로 재사용).
 weighting:
   kind: null  # null | class_based | action_error | rabc | phase_rule | action_variance | event_radius
+  # | stage_difficulty
   target_intv: 0.5       # class_based 전용(SIRIUS 원문 기본값)
   target_preintv: 0.002  # class_based 전용
   beta_d: 1.0             # action_error 전용
@@ -93,6 +94,11 @@ weighting:
   variance_path: null      # action_variance 전용 — scripts/compute_action_variance.py로 만든 npz 경로
   w_min: 0.2               # action_variance 전용, 가중치 clip 하한
   w_max: 5.0               # action_variance 전용, 가중치 clip 상한
+  dropout_rates: null      # stage_difficulty 전용 — stage별 이탈률(vanilla rollout 실측). 순위대로
+  # [stage_w_min, stage_w_max]를 균등 분할해 배정한다. 상수를 고르는 게 아니라 실측에서 도출하는
+  # 게 요점(stage_difficulty.py docstring 참고).
+  stage_w_min: 1.0         # stage_difficulty 전용 — 최하위 stage 가중치. 0을 안 쓰는 이유는
+  stage_w_max: 2.0         # 해당 모듈 docstring 참고(종단 stage를 안 배우게 되는 문제).
 
 # system 축(2026-07-27 추가) — loss 구조. null이면 위 weighting만으로 학습(=SIRIUS 스타일,
 # reference 모델 없음, 기존 동작 그대로). apo면 reference 모델 + KTO 앵커(losses/apo_loss.py,

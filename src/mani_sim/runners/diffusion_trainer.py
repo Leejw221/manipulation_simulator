@@ -148,6 +148,14 @@ class DiffusionTrainer:
                 cfg.task.hdf5_path, critical_weight=weighting_cfg.critical_weight,
                 critical_stages=tuple(weighting_cfg.critical_stages), device=device,
             )
+        elif weighting_kind == "stage_difficulty":
+            # EXP 3차 — 단계별 이탈률(vanilla rollout 실측)에서 가중치를 도출한다.
+            # phase_rule과 달리 임의 상수(critical_weight)를 안 쓰고 zarr에서 읽는다.
+            from mani_sim.weighting.stage_difficulty import StageDifficultyWeight
+            self.weighting = StageDifficultyWeight(
+                cfg.task.zarr_path, dropout_rates=list(weighting_cfg.dropout_rates),
+                w_min=weighting_cfg.stage_w_min, w_max=weighting_cfg.stage_w_max, device=device,
+            )
         elif weighting_kind == "action_variance":
             from mani_sim.weighting.action_variance import ActionVarianceWeight
             self.weighting = ActionVarianceWeight(
@@ -470,7 +478,8 @@ class DiffusionTrainer:
                             z0_calib_buffer = None
                 elif self.weighting is not None:
                     per_sample_loss = self.policy.compute_loss(batch, reduction="none")  # (B,)
-                    if self.weighting_kind in ("rabc", "phase_rule", "action_variance", "event_radius"):
+                    if self.weighting_kind in ("rabc", "phase_rule", "action_variance", "event_radius",
+                                               "stage_difficulty"):
                         weight_b = self.weighting.compute_weights(raw_batch["demo_id"], raw_batch["index_in_demo"])
                     else:
                         action_mode = raw_batch["action_mode"].to(self.device)
