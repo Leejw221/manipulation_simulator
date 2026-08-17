@@ -106,6 +106,7 @@ class APOKTOLoss:
         ars_ratio_clip=10.0,
         reward_reduction="sum",
         z0_gripper_free=True,
+        weight_group_renorm=True,
     ):
         self.beta = beta
         # 앵커(z0)를 gripper 제외 mismatch reward로 통일할지(2026-08-11).
@@ -135,6 +136,7 @@ class APOKTOLoss:
         self.ars_k1 = ars_k1
         self.ars_eps = ars_eps
         self.ars_ratio_clip = ars_ratio_clip
+        self.weight_group_renorm = weight_group_renorm
 
     def compute(self, log_probs, ref_log_probs, weight, action_mode_window, mismatch_reward=None,
                 log_probs_reject=None, ref_log_probs_reject=None, mismatch_reward_reject=None,
@@ -210,7 +212,14 @@ class APOKTOLoss:
         # 비례) 의도치 않게 그룹 간 loss 기여도를 왜곡시킨다(EXP-10.md "7차 시도" 절 참고).
         # 재정규화 후엔 그룹별 총 기여도가 desirable_weight/undesirable_weight·n_chosen/
         # n_rejected로만 결정된다.
-        chosen_weight = chosen_weight_raw / max(chosen_weight_sum, 1e-8) * n_chosen if n_chosen else chosen_weight_raw
+        # weight_group_renorm=False면 APO 원문 그대로 — lambda(=adaptive weight)를 안 건드린다.
+        # 원문 Eq.5/6의 lambda_D=1-exp(-beta_D*w), lambda_U=exp(-beta_U*w)가 곧 샘플 가중치이고
+        # 그룹별 재정규화는 공식 코드에 없다. 실측 효과: 원문대로면 undesirable이 adaptive
+        # weight mass의 93.9%, 재정규화하면 25%(48:16) — 밀어내기 세기가 4배 가까이 달라진다.
+        if self.weight_group_renorm and n_chosen:
+            chosen_weight = chosen_weight_raw / max(chosen_weight_sum, 1e-8) * n_chosen
+        else:
+            chosen_weight = chosen_weight_raw
 
         rejected_reward = reward_reject[~mask]
         margin_rejected = z0_reject - rejected_reward  # 클수록(양수) 그 rejected 샘플이 z0보다 명확히 나쁨=안전
@@ -231,9 +240,10 @@ class APOKTOLoss:
         rejected_losses = self.undesirable_weight * ars_scale * (1 - torch.sigmoid(self.beta * margin))
         rejected_weight_raw = sample_weight[~mask]
         rejected_weight_sum = float(rejected_weight_raw.sum().item()) if n_rejected else 0.0
-        rejected_weight = (
-            rejected_weight_raw / max(rejected_weight_sum, 1e-8) * n_rejected if n_rejected else rejected_weight_raw
-        )
+        if self.weight_group_renorm and n_rejected:
+            rejected_weight = rejected_weight_raw / max(rejected_weight_sum, 1e-8) * n_rejected
+        else:
+            rejected_weight = rejected_weight_raw
 
         losses = torch.cat([chosen_losses, rejected_losses])
         weights = torch.cat([chosen_weight, rejected_weight])

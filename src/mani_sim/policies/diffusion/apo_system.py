@@ -58,12 +58,13 @@ class ApoSystem:
                  preference_frames, init_state_dict=None, reference_ema_enabled=False,
                  reference_ema_momentum=0.999, reference_ema_every=20, z0_clamp_min=-50.0,
                  z0_clamp_max=50.0, use_lora=False, lora_rank=32, lora_alpha=32,
-                 bc_aux_weight=0.0, z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
+                 bc_aux_weight=0.0, bc_aux_weighted=False,
+                 z0_method="match", ars_enabled=False, ars_k1=1.0, ars_eps=1e-4,
                  ars_ratio_clip=10.0, hinge_weight=0.0, kl_retain_weight=0.0,
                  kl_retain_scope="all", kl_retain_ck=True, reward_reduction="sum", z0_gripper_free=True,
                  loss_frames="all", diag_mismatch_every=0,
                  action_error_source="noise_mse", weight_ref_timestep=None, encoder_lr_scale=0.0,
-                 encoder_lora=False):
+                 encoder_lora=False, weight_group_renorm=True):
         """policy: DiffusionPolicyLowDim | DiffusionPolicyImage(이미 device에 올라간 것).
         weighting: weighting/*.py 인스턴스 또는 None(가중치 축 미사용 — 균등 가중).
         init_state_dict: 직전 라운드 체크포인트의 model state_dict. 주어지면 policy를 여기서
@@ -191,6 +192,7 @@ class ApoSystem:
             preference_frames=preference_frames, z0_clamp_min=z0_clamp_min, z0_clamp_max=z0_clamp_max,
             ars_enabled=ars_enabled, ars_k1=ars_k1, ars_eps=ars_eps, ars_ratio_clip=ars_ratio_clip,
             reward_reduction=reward_reduction, z0_gripper_free=z0_gripper_free,
+            weight_group_renorm=weight_group_renorm,
         )
         self.last_ref_distance = 0.0
         # bc_aux_weight(기본 0=원문 그대로): KTO sigmoid는 이미 reward>z0인 desirable
@@ -200,6 +202,12 @@ class ApoSystem:
         # 표준 noise-prediction MSE를 더해, saturate돼도 "이 행동을 계속 재현하라"는 gradient가
         # 남게 한다 — 원문에는 없는 항이며, 우리가 실측으로 특정한 실패 메커니즘을 겨냥한 수정.
         self.bc_aux_weight = bc_aux_weight
+        # BC 항에 가중치 축을 곱할지(2026-08-16 추가). False(기본)=CPO/RPO 형태(비가중).
+        # True면 가중 평균 sum(w*e)/sum(w) — 가중치 축이 손실 전체를 지배하게 한다.
+        # 주의: action_error(w ∝ e)와 함께 쓰면 w*e = e^2이라 (1+CV^2)배 증폭되고(실측 CV≈5),
+        # 무엇보다 **보존 대상인 DEMO의 λD가 0.00043이라 BC 복원력이 같이 꺼진다** —
+        # BC를 넣은 목적 자체가 사라진다. class_based(클래스 상수)면 둘 다 해당 없음.
+        self.bc_aux_weighted = bc_aux_weighted
         self.hinge_weight = hinge_weight
         self.kl_retain_weight = kl_retain_weight
         self.kl_retain_scope = kl_retain_scope
@@ -485,8 +493,13 @@ class ApoSystem:
             # 바뀐 것과 같은 이유(apo_loss.py 해당 라인 주석 참고)로 일관성 있게 맞춤. 이전엔
             # sum이라 desirable 샘플 수가 많은 배치일수록 이 항의 영향력이 커지는 부작용도
             # 있었음 — mean이면 그 문제도 같이 없어짐.
-            n_des = des.float().sum().clamp(min=1.0)
-            bc_loss = (per_sample_error * des.float()).sum() / n_des
+            if self.bc_aux_weighted:
+                # 가중 평균 sum(w*e)/sum(w) — 정규화 상수엔 불변이라 weight의 스케일과 무관.
+                sel = des.float() * weight.mean(dim=1)  # (B,) — kto_loss와 같은 (B,T)->(B,) 관례
+                bc_loss = (per_sample_error * sel).sum() / sel.sum().clamp(min=1e-8)
+            else:
+                n_des = des.float().sum().clamp(min=1.0)
+                bc_loss = (per_sample_error * des.float()).sum() / n_des
             total_loss = total_loss + self.bc_aux_weight * bc_loss
             metrics["bc_aux_loss"] = bc_loss.item()
 
@@ -588,6 +601,7 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         lora_rank=sys_cfg.get("lora_rank", 32),
         lora_alpha=sys_cfg.get("lora_alpha", 16),
         bc_aux_weight=sys_cfg.get("bc_aux_weight", 0.0),
+        bc_aux_weighted=sys_cfg.get("bc_aux_weighted", False),
         hinge_weight=sys_cfg.get("hinge_weight", 0.0),
         kl_retain_weight=sys_cfg.get("kl_retain_weight", 0.0),
         kl_retain_scope=sys_cfg.get("kl_retain_scope", "all"),
@@ -605,4 +619,5 @@ def _build_apo(cfg, policy, weighting, device, init_state_dict):
         weight_ref_timestep=sys_cfg.get("weight_ref_timestep", None),
         encoder_lr_scale=sys_cfg.get("encoder_lr_scale", 0.0),
         encoder_lora=sys_cfg.get("encoder_lora", False),
+        weight_group_renorm=sys_cfg.get("weight_group_renorm", True),
     )

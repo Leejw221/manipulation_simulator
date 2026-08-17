@@ -177,7 +177,29 @@ system:
   lora_alpha: 16   # 2026-07-30: 32→16. 논문 본문엔 alpha 언급 없음(rank=32만 명시) — 실제 공개
                     # 코드(sft_train.py:160, `lora_alpha=min(cfg.lora_rank, 16)`)가 alpha=16으로
                     # 학습·보고했고 이 어댑터를 APO 단계가 그대로 이어받아 씀[검증-코드, 2026-07-30].
-  bc_aux_weight: 0.0  # 원문엔 없는 항(기본 0=꺼짐). KTO sigmoid가 이미 reward>z0인 desirable
+  weight_group_renorm: true  # true(기존) = adaptive weight를 그룹별 평균 1.0으로 재정규화.
+                       # false = APO 원문 그대로(Eq.5/6의 lambda를 그대로 씀, 재정규화 없음).
+                       # 2026-07-29 도입한 우리 이탈 — 실측 효과: 원문대로면 undesirable이
+                       # adaptive weight mass의 93.9%, 재정규화 후엔 25%(48:16).
+  bc_aux_weighted: false  # BC 항에 가중치 축을 곱할지(2026-08-16). false=CPO/RPO 형태(비가중).
+                       # true면 가중 평균 sum(w*e)/sum(w). action_error(w ∝ e)와 함께 쓰면
+                       # w*e = e^2 증폭(실측 CV≈5 → 26배)이고, 더 중요하게는 보존 대상인
+                       # DEMO의 λD가 0.00043이라 BC 복원력이 같이 꺼진다 — BC를 넣은 목적이
+                       # 사라진다. class_based(클래스 상수)면 둘 다 해당 없어 곱하는 게 맞다.
+  bc_aux_weight: 0.0  # 기본 0=꺼짐. **1.0 = LLM 선호 최적화의 표준형**(2026-08-16 근거 확립):
+                       # CPO(arXiv:2401.08417 Eq.5)는 `L_prefer + L_NLL`을 계수 없이 더하고,
+                       # Iterative RPO(arXiv:2404.19733 Eq.1)는 `L_NLL + alpha*L_DPO`에서
+                       # alpha를 {0.5,1,2,4}로 튜닝해 결국 1을 씀 — 둘 다 동등 가중이고 NLL은
+                       # chosen에만, 단위당(길이) 정규화한다. 우리 구현이 이미 그 형태다:
+                       # desirable 마스크 + 프레임 수 평균 + 가중치 **밖**에서 더함.
+                       # 가중치를 BC에 곱하지 않는 이유: CPO/RPO엔 샘플별 적응 가중치가 없어
+                       # 전례가 없고, action_error(w ∝ e)를 곱하면 w*e = e^2이 되어 이상치가
+                       # 제곱 증폭된다(실측 2026-08-16 스모크: bc_contrib가 KTO항의 11배,
+                       # grad_norm 30~36). SIRIUS식 class_based(클래스 상수)면 이 증폭이 없어
+                       # 곱하는 게 맞으므로, 그건 별도 arm으로 검정한다.
+                       # 근거·측정: 노션 `4차 Diffusion-APO 구현 실험`.
+                       # 이하 옛 주석(2026-08-07 도입 시):
+                       # 원문엔 없는 항(기본 0=꺼짐). KTO sigmoid가 이미 reward>z0인 desirable
                        # 샘플에서 saturate돼 보호 gradient가 없다는 걸 round0에서 실측 확인
                        # (base가 잘하던 reach가 8회 시도 전부에서 무너짐, weighting 축 유무와
                        # 무관) — desirable 샘플에 표준 noise-MSE loss를 더해 saturate돼도
