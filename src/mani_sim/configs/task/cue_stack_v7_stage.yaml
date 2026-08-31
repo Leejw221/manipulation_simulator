@@ -1,0 +1,29 @@
+# 색 표식 -> 거울상 쌓기 — stage-conditioned arm. cue_stack.yaml 과 num_stages 한 줄만 다르다.
+#
+# task: 캐비닛 문을 열어 안에 숨겨진 색 표식을 확인하고, 문을 닫고 복귀한 뒤 그 색 블록을
+# 가운데 빨간 블록 위에 쌓는다. 어느 문부터 열지는 에피소드마다 무작위이고, 비어 있으면
+# 반대쪽도 연다.
+#
+# 왜 이 task 인가: "두 문 닫힘 + 팔 원위치 + 블록 제자리" 라는 관측이 한 에피소드 안에서
+# 2~3번 나오는데 그때마다 할 일이 다르다(어느 문을 열 차례 / 어느 색을 쌓을 차례).
+# 관측이 아니라 **이력**에만 있는 정보라, 관측 창이 짧은 일반 visuomotor policy 가
+# 원리적으로 못 푸는 지점이다. stage 는 그 이력 요약이다.
+#
+# stage 7개: A-1 왼쪽열기 / A-2 왼쪽닫기 / B-1 오른쪽열기 / B-2 오른쪽닫기 / C 초록쌓기 /
+#            D 파랑쌓기 / E 종료.  = "무엇을 할 차례"(정체) 라벨.
+# 데이터 생성: ~/claude/collect_stack.py -> ~/claude/stack_to_zarr.py
+name: cue_stack_v7_stage
+dataset_backend: zarr
+zarr_path: /home/moai/jungwook_ws/ljw_workspace/robocasa/data/cue_stack_v7.zarr
+env_backend: robocasa
+
+camera_names: [globalview, robot0_eye_in_hand]
+image_size: 84
+rgb_keys: [global_image, wrist_image]
+lowdim_keys: [state]
+num_stages: 8
+
+# obs_dims/action_dim 은 derive_task_meta_from_zarr 가 학습 시작 시 zarr shape 에서 덮어쓴다.
+obs_dims:
+  state: 11
+action_dim: 10

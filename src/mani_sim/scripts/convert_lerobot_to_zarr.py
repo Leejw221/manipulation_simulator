@@ -25,15 +25,25 @@ import numpy as np
 from omegaconf import DictConfig
 
 
-def _episode_arrays(dataset, camera_keys, ep_from, ep_to):
+def _episode_arrays(dataset, camera_keys, ep_from, ep_to, extra_keys=(), image_size=None):
+    """extra_keys: state/action/이미지 외에 그대로 옮길 스칼라 열(예: stage) — 없으면 무시한다.
+    image_size: 주면 그 크기로 줄인다. mani_sim 학습은 zarr에 든 크기를 **그대로** 쓰므로
+    (dataset에 resize 단계가 없다) 여기서 맞춰야 policy의 image_hw와 어긋나지 않는다."""
     states, actions, images = [], [], {k: [] for k in camera_keys}
+    extras = {k: [] for k in extra_keys}
     for idx in range(ep_from, ep_to):
         item = dataset[idx]
         states.append(item["observation.state"].numpy())
         actions.append(item["action"].numpy())
+        for k in extra_keys:
+            extras[k].append(np.asarray(item[k]).reshape(-1)[0])
         for k in camera_keys:
             img_chw01 = item[f"observation.images.{k}"].numpy()  # (3,H,W) float[0,1]
             img_hwc_u8 = np.clip(img_chw01 * 255.0, 0, 255).astype(np.uint8).transpose(1, 2, 0)
+            if image_size is not None and img_hwc_u8.shape[0] != image_size:
+                import cv2
+                img_hwc_u8 = cv2.resize(img_hwc_u8, (image_size, image_size),
+                                        interpolation=cv2.INTER_AREA)
             images[k].append(img_hwc_u8)
 
     data = {
@@ -42,6 +52,8 @@ def _episode_arrays(dataset, camera_keys, ep_from, ep_to):
     }
     for k in camera_keys:
         data[f"{k}_image"] = np.stack(images[k])
+    for k in extra_keys:
+        data[k] = np.asarray(extras[k], dtype=np.int64)
     return data
 
 
@@ -52,12 +64,14 @@ def main(cfg: DictConfig):
 
     dataset = LeRobotDataset(repo_id=cfg.repo_id, root=cfg.lerobot_root)
     camera_keys = list(cfg.camera_names)
+    extra_keys = list(cfg.get("extra_keys", []))
+    image_size = cfg.get("image_size", None)
 
     buffer = ReplayBuffer.create_from_path(cfg.zarr_path, mode="a")
     for ep_idx in range(dataset.num_episodes):
         row = dataset.meta.episodes[ep_idx]
         ep_from, ep_to = row["dataset_from_index"], row["dataset_to_index"]
-        data = _episode_arrays(dataset, camera_keys, ep_from, ep_to)
+        data = _episode_arrays(dataset, camera_keys, ep_from, ep_to, extra_keys, image_size)
         buffer.add_episode(data)
         print(f"episode {ep_idx}: {ep_to - ep_from} frames -> zarr (누적 {buffer.n_steps} steps)")
 

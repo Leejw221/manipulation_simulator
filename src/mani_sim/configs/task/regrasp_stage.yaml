@@ -1,0 +1,31 @@
+# 되집기 cube stack — **stage-conditioned**. regrasp.yaml 과 zarr 를 공유하고 num_stages 만 다르다.
+#
+# task: 회색 큐브를 빨강 큐브 위에 쌓고, 그리퍼를 벌린 뒤 바로 다시 집어 원위치에 되돌리고
+# 복귀한다. **첫 프레임과 마지막 프레임이 동일**한데(큐브 제자리·팔 홈) 그때 할 일은 정반대다
+# — 시작에선 집으러 가야 하고 끝에선 멈춰야 한다. 관측이 아니라 이력에만 있는 정보다.
+#
+# 실물 결과: 일반 cube stack 20/20 · 되집기 non-stage 0/20 · 되집기 stage 18/20 (Fisher p=3.4e-9)
+# 시뮬 검수 [실측 2026-08-31]: 첫/마지막 프레임 84px 차이 0.26%(무작위 쌍 4.11%),
+#   aliasing 지수 1.35(global+wrist) — 기각선 0.45 위, 실물 2.08 아래(에피소드 길이 차 때문)
+#
+# stage 버전은 regrasp_stage.yaml — num_stages 한 줄만 다르고 zarr 는 공유한다.
+# 데이터 생성: ~/claude/collect_regrasp.py -> ~/claude/stack_to_zarr.py --relabel none
+name: regrasp_stage
+dataset_backend: zarr
+zarr_path: /home/moai/jungwook_ws/ljw_workspace/robocasa/data/regrasp.zarr
+env_backend: robosuite
+
+camera_names: [agentview, robot0_eye_in_hand]
+image_size: 84
+rgb_keys: [global_image, wrist_image]
+lowdim_keys: [state]
+
+# obs_dims/action_dim 은 derive_task_meta_from_zarr 가 학습 시작 시 zarr shape 에서 덮어쓴다.
+obs_dims:
+  state: 11
+action_dim: 10
+
+# 0=A 블록 위에 쌓기 · 1=B 원위치 시키고 복귀 · 2=C 종료 상태 (실물과 동일한 3분기)
+# 경계 = 그리퍼 벌림 완료 2회 — **로봇 자신의 신호**라 실물에 그대로 옮겨진다
+# (cue_stack 은 트래커가 시뮬레이터 문 각도를 읽어야 했다 = 특권 정보).
+num_stages: 3

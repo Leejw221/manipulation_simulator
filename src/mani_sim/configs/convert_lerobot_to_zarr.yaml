@@ -3,3 +3,9 @@ repo_id: mani_sim/piper_sort_return
 lerobot_root: data/piper_sort_return/lerobot_raw
 zarr_path: data/piper_sort_return/piper_sort_return.zarr
 camera_names: [front, wrist]
+
+# 아래 둘은 선택 항목(없으면 기존 동작 그대로).
+# extra_keys: state/action/이미지 외에 zarr로 그대로 옮길 스칼라 열 (예: [stage])
+# image_size: zarr에 저장할 이미지 한 변 (mani_sim은 zarr에 든 크기를 그대로 쓴다)
+extra_keys: []
+image_size: null
