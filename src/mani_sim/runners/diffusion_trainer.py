@@ -194,6 +194,7 @@ class DiffusionTrainer:
                 zarr_path=cfg.task.zarr_path,
                 obs_keys=task_obs_keys(cfg.task),
                 obs_horizon=cfg.policy.obs_horizon,
+                obs_gap=cfg.policy.get("obs_gap", 1),
                 pred_horizon=cfg.policy.pred_horizon,
                 normalizer=self.normalizer,
                 rgb_keys=cfg.task.rgb_keys if self.is_image else (),

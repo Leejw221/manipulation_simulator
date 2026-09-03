@@ -28,11 +28,12 @@ class ZarrSequenceDataset(torch.utils.data.Dataset):
 
     def __init__(
         self, zarr_path, obs_keys, obs_horizon, pred_horizon, normalizer=None,
-        action_key="action", rgb_keys=(), extra_keys=(),
+        action_key="action", rgb_keys=(), extra_keys=(), obs_gap=1,
     ):
         self.rgb_keys = list(rgb_keys)
         self.obs_keys = list(obs_keys)
         self.obs_horizon = obs_horizon
+        self.obs_gap = obs_gap      # 관측 프레임 사이 간격 (1 = 기존 동작: 연속 프레임)
         self.pred_horizon = pred_horizon
         self.normalizer = normalizer
         self.action_key = action_key
@@ -80,12 +81,20 @@ class ZarrSequenceDataset(torch.utils.data.Dataset):
         return len(self._index)
 
     def _get_window(self, key, start, end, t, horizon, before):
-        """before=True: [t-horizon+1, t] / False: [t, t+horizon-1] - 범위 밖은 가장자리
-        프레임 반복(clip)으로 패딩."""
+        """before=True: [t-(horizon-1)*gap, ..., t-gap, t] / False: [t, t+horizon-1].
+        범위 밖은 가장자리 프레임 반복(clip)으로 패딩.
+
+        관측(before=True)에만 `obs_gap` 을 적용한다. gap>1 이면 프레임 사이를 벌려
+        **진행 방향**을 읽을 수 있게 한다 — 20Hz 연속 2프레임은 50ms 차이라 팔이
+        0.42cm 움직이고 84px 화면이 0.44% 밖에 안 달라진다(= 완전히 같은 두 장면 0.26%
+        수준) [실측 2026-09-01]. 에피소드 앞부분은 clip 때문에 자동으로 첫 프레임에
+        고정되는데, 이는 SARM 원문(xdofai `get_frame_indices`)이 ep_start 를 앵커로
+        넣는 것과 같은 효과다."""
         arr = self._buffer.data[key]
         demo_len = end - start
         if before:
-            offsets = range(-horizon + 1, 1)
+            g = self.obs_gap
+            offsets = range(-(horizon - 1) * g, 1, g)
         else:
             offsets = range(0, horizon)
         idxs = [int(np.clip(t + o, 0, demo_len - 1)) for o in offsets]

@@ -1,5 +1,8 @@
 name: diffusion_unet
 obs_horizon: 2
+# 관측 프레임 사이 간격(프레임). 1 = 연속(기존 동작). zarr 경로에서만 쓴다.
+# 되집기 task 는 16(0.8초)이 근거 있음 — 근거 3경로는 HANDOFF 「관측 간격」 절.
+obs_gap: 1
 pred_horizon: 16
 action_horizon: 8
 num_kp: 32
